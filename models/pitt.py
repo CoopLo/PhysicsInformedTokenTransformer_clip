@@ -586,6 +586,128 @@ class StandardPhysicsInformedTokenTransformer(nn.Module):
         return x[...,0] + out
 
 
+class CLIPTransformer(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_heads, output_dim, neural_operator,
+                 temporal_neural_operator, dropout=0.1):
+        super().__init__()
+
+        self.output_dim = output_dim
+        self.hidden_dim = hidden_dim
+
+        # For CLIP
+        self.sentence_proj = nn.Linear(384, 50)
+        self.diff_x_proj = nn.Linear(self.output_dim, 50)
+
+        # Get input processing
+        self.kh1_embedding = nn.Linear(self.output_dim, hidden_dim, bias=False)
+        self.kh2_embedding = nn.Linear(self.output_dim, hidden_dim, bias=False)
+
+        # Query and value processing
+        self.vh_embedding_layer = nn.Linear(output_dim, hidden_dim, bias=False)
+        self.vh_unembedding_layer = nn.Sequential(
+                                         nn.Linear(hidden_dim, hidden_dim),
+                                         nn.SiLU(),
+                                         nn.Dropout(dropout),
+                                         nn.Linear(hidden_dim, hidden_dim),
+                                         nn.SiLU(),
+                                         nn.Dropout(dropout),
+                                         nn.Linear(hidden_dim, self.output_dim)
+                                    )
+
+        # Internal Physics Model
+        self.neural_operator = neural_operator
+        self.temporal_neural_operator = temporal_neural_operator
+
+        # Dropout and layer number specification
+        self.dropout = nn.Dropout(dropout)
+        self.num_layers = num_layers
+
+        self.feval_mhls = torch.nn.ModuleList()
+        self.updates = torch.nn.ModuleList()
+        for l in range(self.num_layers):
+
+            # For updating state
+            self.feval_mhls.append(LinearAttention(input_dim=hidden_dim, attn_type='galerkin',
+                                      heads=num_heads, dim_head=hidden_dim, dropout=dropout,
+                                      relative_emb=False,
+                                      init_method='xavier',
+                                      init_gain=1.
+            ))
+
+            # NN Update
+            self.updates.append(nn.Sequential(
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim)
+            ))
+
+
+    def forward(self, queries, sentence, values, t, clip=False, batch=None):
+
+        # Get shapes right
+        values = values.transpose(1,2)
+        queries = queries.unsqueeze(-1)
+
+        if(clip):
+            # Temporal Physics Model Forwarr
+
+            diff_x = self.temporal_neural_operator(values, queries)
+            if(len(diff_x.shape) == 4):
+                diff_x = diff_x[...,0,0]
+            #if(batch is not None):
+            #    sentence_emb = self.sentence_proj(sentence) if(batch%20 < 10) else self.sentence_proj(sentence).detach()
+            #    token_emb = self.token_proj(diff_x.flatten(1,2)) if(batch%20 >= 10) else self.token_proj(diff_x.flatten(1,2)).detach()
+            #else:
+            #    sentence_emb = self.sentence_proj(sentence)
+            #    token_emb = self.token_proj(diff_x.flatten(1,2))
+            sentence_emb = self.sentence_proj(sentence)
+            token_emb = self.diff_x_proj(diff_x)
+
+            cross_corr = torch.bmm(token_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
+            return cross_corr
+        else:
+            with torch.no_grad():
+                # Temporal Physics Model Forward
+                diff_x = self.temporal_neural_operator(values, queries)
+                if(len(diff_x.shape) == 4):
+                    diff_x = diff_x[...,0,0]
+
+        # Get difference between physics model output and input
+        x = self.neural_operator(values, queries)
+        x = x.reshape(x.shape[0], self.output_dim)
+        dx = x - values[...,-1]
+        dx = dx.unsqueeze(-1)
+
+        # Embed Values
+        vh = self.vh_embedding_layer(dx[...,0]).unsqueeze(1)
+
+        # Use FNO embedding
+        vh_old = vh.clone()
+
+        # Embed temporal representation
+        kh1 = self.kh1_embedding(diff_x).unsqueeze(1)
+        kh2 = self.kh2_embedding(diff_x).unsqueeze(1)
+
+        #print("OLD VH SHAPE: {}".format(vh_old.shape))
+        for l in range(self.num_layers):
+
+            # Calcuate update
+            update, _ = self.feval_mhls[l](kh1, kh2, vh_old)
+            update_h = self.updates[l](update)
+
+            # Apply update
+            vh = vh_old + update_h
+            vh_old = vh.clone()
+
+        # Unembed
+        vh = self.vh_unembedding_layer(vh)
+        return x + vh.reshape(x.shape)
+
+
 class PhysicsInformedTokenTransformer2D(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_layers, num_heads, output_dim1, output_dim2, neural_operator, dropout=0.1):
         super().__init__()
@@ -933,4 +1055,316 @@ class StandardPhysicsInformedTokenTransformer2D(nn.Module):
         vh = torch.swapaxes(self.vh_unembedding_layer(torch.swapaxes(vh, 1, 2)), 1, 2)
         out = self.output_layers(vh)[...,0].reshape((x.shape[0], x.shape[1], x.shape[2]))
         return x + out
+
+
+class CLIPPhysicsInformedTokenTransformer2D(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_heads, output_dim1, output_dim2, neural_operator, dropout=0.1):
+        super().__init__()
+
+        self.temp = nn.Linear(100, 100, bias=False)
+        self.temp.weight.data.copy_(torch.eye(100))
+        self.output_dim1 = output_dim1
+        self.output_dim2 = output_dim2
+        self.hidden_dim = hidden_dim
+
+        self.embedding = torch.nn.Embedding(100, hidden_dim)
+        self.pos_encoding = PositionalEncoding(hidden_dim, dropout)
+
+        # For CLIP
+        self.sentence_proj = nn.Linear(384, 50)
+        #self.x_proj = nn.Linear(self.output_dim1*self.output_dim2, 50)
+        self.token_proj = nn.Linear(input_dim*self.hidden_dim, 50)
+
+        # Get input processing
+        self.k_embedding_layer = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.embedding_layer1 = nn.Linear(1, hidden_dim, bias=False)
+        self.embedding_layer2 = nn.Linear(1, hidden_dim, bias=False)
+        self.embedding_layer3 = nn.Linear(1, hidden_dim, bias=False)
+
+        self.kh1_embedding = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.kh2_embedding = nn.Linear(hidden_dim, hidden_dim, bias=False)
+
+        # Query and value processing
+        self.q_embedding_layer = nn.Linear(1, hidden_dim, bias=False)
+        self.v_embedding_layer = nn.Linear(1, hidden_dim, bias=False)
+        self.vh_embedding_layer = nn.Linear(output_dim1*output_dim2, 100, bias=False)
+        self.vh_unembedding_layer = nn.Linear(100, output_dim1*output_dim2, bias=False)
+
+        self.output_layer = nn.Linear(hidden_dim, output_dim1)
+
+        # Internal Physics Model
+        self.neural_operator = neural_operator
+
+        # Dropout and layer number specification
+        self.dropout = nn.Dropout(dropout)
+        self.num_layers = num_layers
+
+        # Maybe give the option for multiple layers
+        self.mhls = torch.nn.ModuleList()
+        self.mhls.append(nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True))
+
+        self.feval_mhls = torch.nn.ModuleList()
+        self.t_embeddings = torch.nn.ModuleList()
+        self.updates = torch.nn.ModuleList()
+        self.updates_h = torch.nn.ModuleList()
+        for l in range(self.num_layers):
+
+            # For updating state
+            self.feval_mhls.append(LinearAttention(input_dim=hidden_dim, attn_type='galerkin',
+                                      heads=num_heads, dim_head=hidden_dim, dropout=dropout,
+                                      relative_emb=False,
+                                      init_method='xavier',
+                                      init_gain=1.
+            ))
+
+            # Embedding time
+            self.t_embeddings.append(torch.nn.Linear(1, hidden_dim))
+
+            # NN Update
+            self.updates.append(nn.Sequential(
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim)
+            ))
+
+            # NN Update
+            self.updates_h.append(nn.Sequential(
+                                       nn.Linear(100+1, 100),
+                                       nn.GELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(100, 100),
+                                       nn.GELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(100, 100)
+            ))
+
+        self.project_in = nn.Linear(100, 1)
+
+        # Output decoding layer
+        self.output_layers = nn.Sequential(
+                     nn.Linear(hidden_dim, hidden_dim),
+                     nn.GELU(),
+                     nn.Dropout(dropout),
+                     nn.Linear(hidden_dim, hidden_dim),
+                     nn.GELU(),
+                     nn.Dropout(dropout),
+                     nn.Linear(hidden_dim, 1)
+        )
+
+        # This needs to vary based on other model. Might take out for default training.
+        self.act = nn.SiLU()
+
+
+    def forward(self, queries, keys, values, t, sentence=None, clip=False, batch=None):
+
+        # Physics Model Forward
+        if(isinstance(self.neural_operator, DeepONet2D)):
+            x = self.neural_operator(values, queries)
+        else:
+            if(isinstance(self.neural_operator, FNO2d)):
+                x = self.neural_operator(values, queries)
+            else:
+                x = self.neural_operator(values, queries)
+
+        x = x.reshape(x.shape[0], self.output_dim1, self.output_dim2)
+
+        # Get difference between physics model output and input
+        dx = x - values[...,-1]
+        dx = dx.unsqueeze(-1)
+
+        # Embedding
+        keys = self.embedding(keys.long()) * np.sqrt(self.hidden_dim)
+        keys = self.pos_encoding(keys)
+
+        ## Scale and shift the keys
+
+        ## Keys
+        kh1 = keys.clone()
+        kh2 = keys.clone()
+        kh3 = keys.clone()
+
+        # Process equation -> TODO maybe sub this for linear attention based on output from temporal embedding?
+        for l in range(1):
+
+            # Attention on just equation tokens
+            ah, _ = self.mhls[l](kh1, kh2, kh3)
+            #return _
+            ah = self.dropout(ah)
+
+            # Copy hidden state to input for next layer
+            kh1 = ah.clone()
+            kh2 = ah.clone()
+            kh3 = ah.clone()
+
+        #print(ah.shape)
+        # Keys is tokens/sentence embedding
+        if(clip):
+            if(batch is not None):
+                sentence_emb = self.sentence_proj(sentence) if(batch%20 < 10) else self.sentence_proj(sentence).detach()
+                token_emb = self.token_proj(ah.flatten(1,2)) if(batch%20 >= 10) else self.token_proj(ah.flatten(1,2)).detach()
+            else:
+                sentence_emb = self.sentence_proj(sentence)
+                token_emb = self.token_proj(ah.flatten(1,2))
+
+            cross_corr = torch.bmm(token_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
+            return cross_corr
+
+        # Embed Values
+        dx = dx.flatten(1,2)[...,0]
+        vh = self.vh_embedding_layer(dx).unsqueeze(-1)
+        vh = self.v_embedding_layer(vh)
+
+        # Use FNO embedding
+        vh_old = vh.clone()
+
+        # Embed time
+        t = t.unsqueeze(1).unsqueeze(1)
+        t_frac = t/self.num_layers
+
+        kh1 = self.kh1_embedding(kh1)
+        kh2 = self.kh2_embedding(kh2)
+
+        for l in range(self.num_layers):
+
+            update, _ = self.feval_mhls[l](kh1, kh2, vh_old)
+            update = self.dropout(update)
+
+            t_h = self.t_embeddings[l](t_frac)
+            up_t = torch.swapaxes(torch.cat((update, t_h), dim=1), 1, 2)
+            #print(up_t.shape)
+            up_th = torch.swapaxes(self.updates_h[l](up_t), 1, 2)
+
+            #print(vh_old.shape, up_th.shape)
+            vh = vh_old + up_th
+
+            vh_old = vh.clone()
+
+            t_frac = t_frac + t/self.num_layers
+
+        vh = torch.swapaxes(self.vh_unembedding_layer(torch.swapaxes(vh, 1, 2)), 1, 2)
+        out = self.output_layers(vh)[...,0].reshape((x.shape[0], x.shape[1], x.shape[2]))
+        return x + out
+
+
+class CLIPTransformer2D(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_heads, output_dim1, output_dim2, neural_operator,
+                 temporal_neural_operator, dropout=0.1):
+        super().__init__()
+
+        self.temp = nn.Linear(100, 100, bias=False)
+        self.temp.weight.data.copy_(torch.eye(100))
+        self.output_dim1 = output_dim1
+        self.output_dim2 = output_dim2
+        self.hidden_dim = hidden_dim
+
+        # For CLIP
+        self.sentence_proj = nn.Linear(384, 50)
+        self.diff_x_proj = nn.Linear(self.output_dim1*self.output_dim2, 50)
+
+        # Get input processing
+        self.kh1_embedding = nn.Linear(self.output_dim1*self.output_dim2, hidden_dim, bias=False)
+        self.kh2_embedding = nn.Linear(self.output_dim1*self.output_dim2, hidden_dim, bias=False)
+
+        # Query and value processing
+        self.vh_embedding_layer = nn.Linear(output_dim1*output_dim2, hidden_dim, bias=False)
+        self.vh_unembedding_layer = nn.Sequential(
+                                         nn.Linear(hidden_dim, 2*hidden_dim),
+                                         nn.SiLU(),
+                                         nn.Dropout(dropout),
+                                         nn.Linear(2*hidden_dim, 2*hidden_dim),
+                                         nn.SiLU(),
+                                         nn.Dropout(dropout),
+                                         nn.Linear(2*hidden_dim, self.output_dim1*self.output_dim2)
+                                    )
+
+        # Internal Physics Model
+        self.neural_operator = neural_operator
+        self.temporal_neural_operator = temporal_neural_operator
+
+        # Dropout and layer number specification
+        self.dropout = nn.Dropout(dropout)
+        self.num_layers = num_layers
+
+        self.feval_mhls = torch.nn.ModuleList()
+        self.updates = torch.nn.ModuleList()
+        for l in range(self.num_layers):
+
+            # For updating state
+            self.feval_mhls.append(LinearAttention(input_dim=hidden_dim, attn_type='galerkin',
+                                      heads=num_heads, dim_head=hidden_dim, dropout=dropout,
+                                      relative_emb=False,
+                                      init_method='xavier',
+                                      init_gain=1.
+            ))
+
+            # NN Update
+            self.updates.append(nn.Sequential(
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim)
+            ))
+
+
+    def forward(self, queries, keys, values, t, sentence=None, clip=False, batch=None):
+
+
+        if(clip):
+            # Temporal Physics Model Forward
+
+            diff_x = self.temporal_neural_operator(values, queries)
+            #if(batch is not None):
+            #    sentence_emb = self.sentence_proj(sentence) if(batch%20 < 10) else self.sentence_proj(sentence).detach()
+            #    token_emb = self.token_proj(diff_x.flatten(1,2)) if(batch%20 >= 10) else self.token_proj(diff_x.flatten(1,2)).detach()
+            #else:
+            #    sentence_emb = self.sentence_proj(sentence)
+            #    token_emb = self.token_proj(diff_x.flatten(1,2))
+            sentence_emb = self.sentence_proj(sentence)
+            token_emb = self.diff_x_proj(diff_x.flatten(1,2))
+
+            cross_corr = torch.bmm(token_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
+            return cross_corr
+        else:
+            with torch.no_grad():
+                # Temporal Physics Model Forward
+                diff_x = self.temporal_neural_operator(values, queries)
+
+        # Get difference between physics model output and input
+        x = self.neural_operator(values, queries)
+        x = x.reshape(x.shape[0], self.output_dim1, self.output_dim2)
+        dx = x - values[...,-1]
+        dx = dx.unsqueeze(-1)
+
+        # Embed Values
+        dx = dx.flatten(1,2)[...,0]
+        vh = self.vh_embedding_layer(dx).unsqueeze(1)
+
+        # Use FNO embedding
+        vh_old = vh.clone()
+
+        # Embed temporal representation
+        kh1 = self.kh1_embedding(diff_x.flatten(1,2)).unsqueeze(1)
+        kh2 = self.kh2_embedding(diff_x.flatten(1,2)).unsqueeze(1)
+
+        #print("OLD VH SHAPE: {}".format(vh_old.shape))
+        for l in range(self.num_layers):
+
+            # Calcuate update
+            update, _ = self.feval_mhls[l](kh1, kh2, vh_old)
+            update_h = self.updates[l](update)
+
+            # Apply update
+            vh = vh_old + update_h
+            vh_old = vh.clone()
+
+        # Unembed
+        vh = self.vh_unembedding_layer(vh)
+        return x + vh.reshape(x.shape)
 

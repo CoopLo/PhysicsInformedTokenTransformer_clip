@@ -9,9 +9,9 @@ args:
     model: 'pitt' 
     neural_operator: 'deeponet' # fno, oformer, deeponet
 
-    embedding: 'standard'
+    #embedding: 'standard'
     #embedding: 'novel'
-    #
+    embedding: 'clip'
 
     #split_style: 'equation'
     split_style: 'initial_condition'
@@ -28,8 +28,8 @@ args:
     rollout_length: 1
     num_workers: 0
     batch_size: 16
+    pretraining_batch_size: 16
     initial_step: 1
-    #initial_step: 41
     t_train: 200
     model_update: 1
 
@@ -45,15 +45,24 @@ args:
     reduced_batch: 1
 
     epochs: 200
+    pretraining_epochs: 200
+    #pretraining_epochs: 0
     num_seeds: 5
     dropout: 0.6
 
     # Optimizer
     learning_rate: 1.e-3
-    weight_decay: 1.e-4
+    weight_decay: 1.e-3
     scheduler_step: 2
     scheduler_gamma: 0.1
     training_type: single
+
+    # Pretraining optimizer
+    pretraining_learning_rate: 1.e-3
+    pretraining_weight_decay: 1.e-8
+    pretraining_scheduler_step: 2
+    pretraining_scheduler_gamma: 0.1
+    pretraining_training_type: single
 
     #
     #num_x: 60
@@ -76,7 +85,7 @@ args:
     
     # For mixed next step training
     #samples_per_equation: 1
-    samples_per_equation: 5
+    samples_per_equation: 1
 
     # Transformer
     hidden: 64

@@ -162,6 +162,7 @@ import itertools
 import random
 import copy
 import gc
+from sentence_transformers import SentenceTransformer
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device = 'cpu'
@@ -617,6 +618,487 @@ class TransformerOperatorDataset(Dataset):
                        self.grid[sim_num][...,np.newaxis]
 
 
+class TransformerMultiOperatorDataset(Dataset):
+    def __init__(self, base_path,
+                 initial_step=10,
+                 saved_folder='./data/',
+                 reduced_resolution=1,
+                 reduced_resolution_t=1,
+                 reduced_batch=1,
+                 num_t=200,
+                 num_x=200,
+                 sim_time=-1,
+                 split="train",
+                 test_ratio=0.2,
+                 val_ratio=0.2,
+                 num_samples=None,
+                 return_text=False,
+                 rollout_length=10,
+                 train_style='fixed_future',
+                 seed=None,
+                 augment=False, ssl=False, forcing=False, clip=False,
+                 ):
+        """
+
+        :param filename: filename that contains the dataset
+        :type filename: STR
+        :param filenum: array containing indices of filename included in the dataset
+        :type filenum: ARRAY
+        :param initial_step: time steps taken as initial condition, defaults to 10
+        :type initial_step: INT, optional
+
+        """
+
+        # Define path to files
+        #self.file_path = os.path.abspath(f.filename)
+        #self.file_path = os.path.abspath(saved_folder + filename + ".h5")
+        self.return_text = return_text
+        self.train_style = train_style
+        self.augment = augment
+        self.ssl = ssl
+        self.forcing = forcing
+        self._pretrain_tokens = False
+
+        self.clip = clip
+        if(self.clip):
+            print("\nUSING CLIP EMBEDDINGS\n")
+            self.sentence_embedder = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
+            self.sentence_embeddings = []
+
+        #data_files = ['varied_heat_10000.h5', 'varied_burgers_2500.h5', 'varied_kdv_2500.h5']
+
+        #data_files = ['varied_heat_2500.h5', 'varied_burgers_2500.h5', 'varied_kdv_2500.h5']
+        data_files = ['kdv_250.h5']
+
+        self.data = []
+        self.grid = []
+        self.time = []
+        self.tokens = []
+        self.available_idxs = []
+        self.all_data_list = []
+        self.all_operator_maps = []
+        for df in data_files:
+            f = h5py.File("{}{}".format(base_path, df), 'r')
+
+            # Get data list
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            if('heat' in df):
+                data_list = [key for key in f.keys() if(len(key.split("_")) == 3)]
+            else:
+                data_list = [key for key in f.keys()]
+            np.random.shuffle(data_list)
+
+            self.data_list = data_list
+
+            # Get target split. Seeding is required to make this reproducible.
+            # This splits each run, lets try a better shuffle
+            if(num_samples is not None):
+                data_list = data_list[:num_samples]
+
+            train_idx = int(len(data_list) * (1 - test_ratio - val_ratio))
+            val_idx = int(len(data_list) * (1-test_ratio))
+            if(split == "train"):
+                self.data_list = np.array(data_list[:train_idx])
+            elif(split == "val"):
+                self.data_list = np.array(data_list[train_idx:val_idx])
+            elif(split == "test"):
+                self.data_list = np.array(data_list[val_idx:])
+            else:
+                raise ValueError("Select train, val, or test split. {} is invalid.".format(split))
+
+            # Hold on to all of the datas
+            self.all_data_list.append(self.data_list)
+
+            # Time steps used as initial conditions
+            self.initial_step = initial_step
+            self.rollout_length = rollout_length
+
+            self.WORDS = ['(', ')', '+', '-', '*', '/', 'Derivative', 'Sum', 'j', 'A_j', 'l_j',
+                     'omega_j', 'phi_j'    , 'sin', 't', 'u', 'x', 'dirichlet', 'neumann',
+                     "None", '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10^',
+                     #'E', ',', '.', '&']
+                     'E', 'e', ',', '.', '&']
+            self.word2id = {w: i for i, w in enumerate(self.WORDS)}
+            self.id2word = {i: w for i, w in enumerate(self.WORDS)}
+            self.num_t = num_t
+            self.num_x = num_x
+            self.name = "pde_{}-{}".format(self.num_t, self.num_x)
+
+            #self.h5_file = h5py.File(self.file_path, 'r')
+            self.sim_time = sim_time
+
+            #print(len(self.data_list))
+            #raise
+            for i in tqdm(range(len(self.data_list))):
+                seed_group = f[self.data_list[i]]
+
+                # Get sentence embeddings
+                d_split = self.data_list[i].split("_")
+                if(d_split[0] == 'KdV'):
+                    # Wikipedia entry
+                    sentence = 'The Korteweg–De Vries (KdV) equation is a partial differential equation (PDE) which serves as a mathematical model of waves on shallow water surfaces.'
+                    sentence += ' The KdV equation is a nonlinear, dispersive partial differential equation.'
+                    sentence += ' In this case, the advection term has a coefficient of {}, and the dispersion coefficient has a coefficient of {}.'.format(d_split[2], d_split[3])
+                elif(d_split[0] == 'Heat'):
+                    sentence = 'The Heat equation models how a quantity such as heat diffuses through a given region.'
+                    sentence += ' The Heat equation is a linear parabolic partial differential equation.'
+                    sentence += ' In this case, the diffusion term has a coefficient of {}.'.format(d_split[2])
+                elif(d_split[0] == 'Burgers'):
+                    sentence = 'Burgers equation models a conservative system that can develop shock wave discontinuities.'
+                    sentence += ' Burgers equation is a first order quasilinear hyperbolic partial differential equation.'
+                    sentence += ' In this case, the advection term has a coefficient of {}, and the diffusion term has a coefficient of {}.'.format(d_split[2], d_split[3])
+                
+                self.sentence_embeddings.append(self.sentence_embedder.encode(sentence))
+                self.data.append(seed_group[self.name][0])
+
+                if(self.train_style == 'next_step'):
+                    idxs = np.arange(0, len(seed_group[self.name][0]))[self.initial_step:]
+                elif(self.train_style == 'arbitrary_step'):
+                    idxs = np.arange(0, len(seed_group[self.name][0]))[self.initial_step:]
+
+                else:#(self.train_style == 'rollout'):
+                    length = len(seed_group[self.name][0])
+                    idxs = np.arange(0, length)[self.initial_step:length-self.rollout_length]
+
+                if(len(self.available_idxs) != 0):
+                    idxs += self.available_idxs[-1] + 1 if(self.train_style == 'next_step') else \
+                            self.available_idxs[-1] + 1 + self.rollout_length if(self.train_style == 'rollout') else \
+                                                self.available_idxs[-1] + 1
+                self.available_idxs.extend(idxs)
+
+                self.grid.append(np.array(seed_group[self.name].attrs["x"], dtype='f'))
+                if(self.return_text):
+                    #raise
+                    #self.tokens.append(list(torch.Tensor(seed_group[self.name].attrs['encoded_tokens'])))
+                    self.tokens.append(torch.Tensor(seed_group[self.name].attrs['encoded_tokens']))
+                    #print(''.join([self.id2word[int(t)] for t in self.tokens[-1][:54]]))
+                    self.time.append(seed_group[self.name].attrs['t'])
+                    #print(self.data_list[i])
+                    dl_split = self.data_list[i].split("_")
+                    #print(dl_split)
+                    if(dl_split[0] == 'Burgers'):
+                        omap = [float(dl_split[2]), float(dl_split[3]), 0]
+                        #print(dl_split)
+                    elif(dl_split[0] == 'Heat'):
+                        omap = [0, float(dl_split[2]), 0]
+                        #omap = [0, float(dl_split[3]), 0]
+                        #print(dl_split)
+                    elif(dl_split[0] == 'KdV'):
+                        omap = [float(dl_split[2]), 0, float(dl_split[3])]
+                    else:
+                        raise ValueError("Invalid 1D data set used. Only Heat, Burgers, and KdV are currently supported.")
+                    self.all_operator_maps.append(omap)
+                    #print(omap)
+                    #print(self.data_list)
+                    #raise
+
+            f.close()
+            #raise
+
+        self.data = torch.Tensor(np.array(self.data))#.to(device=device)
+        self.grid = torch.Tensor(np.array(self.grid))#.to(device=device)
+        self.all_data_list = np.array(self.all_data_list).flatten()
+        self.all_operator_maps = np.array(self.all_operator_maps).reshape((-1,3))
+
+        #print(self.all_data_list)
+        print("\nNUMBER OF SAMPLES: {}".format(len(self.available_idxs)))
+        #raise
+
+        def forcing_term(x, t, As, ls, phis, omegas):
+            return np.sum(As[i]*torch.sin(2*np.pi/16. * ls[i]*x + omegas[i]*t + phis[i]) for i in range(len(As)))
+
+        # Not suitable for autoregressive training
+        if(self.train_style == 'fixed_future'):
+            time_included_tokens = []
+            for idx, token in tqdm(enumerate(self.tokens)):
+                time_tokens = self._encode_tokens("&" + str(self.time[idx][self.sim_time]))
+                while(len(time_tokens) + len(self.tokens[idx]) < 490): # Padding
+                    time_tokens.append(len(self.WORDS))
+                time_included_tokens.append(np.append(self.tokens[idx], time_tokens))
+            self.time_included_tokens = torch.Tensor(np.array(time_included_tokens))#.to(device=device)#.cuda()#.int()
+
+        elif(self.train_style in ['next_step', 'arbitrary_step'] and self.return_text):
+            # Create array of all legal encodings, pdes, and data
+            if(self.augment):
+                self.all_tokens = []
+                self.all_tokens_map = []
+            else:
+                self.all_tokens = torch.empty(len(self.available_idxs), 500)#.to(device=device)#.cuda()
+
+            if(self.forcing):
+                self.forcing_terms = []
+                self.times = torch.empty(len(self.available_idxs))
+
+            #print("Processing data...")
+            #print(self.available_idxs)
+            #raise
+            for idx, sim_idx in tqdm(enumerate(self.available_idxs)):
+                #sim_idx = self.available_idxs[idx]      # Get valid prestored index
+                sim_num = sim_idx // self.data.shape[1] # Get simulation number
+                sim_time = sim_idx % self.data.shape[1] # Get time from that simulation
+                if(self.return_text):
+                    slice_tokens = self._encode_tokens("&" + str(self.time[sim_num][sim_time]))
+                    return_tokens = torch.Tensor(self.tokens[sim_num].clone())
+
+                    # TODO: Maybe put this back
+                    #return_tokens = torch.cat((return_tokens, torch.Tensor(slice_tokens).cpu())).cpu()
+                    return_tokens = torch.cat((return_tokens, torch.Tensor(slice_tokens)))
+
+                    return_tokens = torch.cat((return_tokens, torch.Tensor([len(self.WORDS)]*(500 - len(return_tokens))).cuda()))
+                    self.all_tokens[idx] = return_tokens.to(device=device)#.cuda()
+
+                    return_tokens = torch.cat((return_tokens, torch.Tensor([len(self.WORDS)]*(500 - len(return_tokens)))))
+                    self.all_tokens[idx] = return_tokens#.to(device=device)#.cuda()
+                    #print(self.all_tokens[idx])
+
+        if(self.return_text):
+            self.all_tokens = self.all_tokens#.to(device=device)#.cuda()
+        self.time = torch.Tensor(self.time)#.to(device=device)
+        if(self.augment):
+            print("\nNumber of augmented samples: {}\n".format(len(self.all_tokens)))
+
+    def _encode_tokens(self, all_tokens):
+        encoded_tokens = []
+        num_concat = 0
+        for i in range(len(all_tokens)):
+            try: # All the operators, bcs, regular symbols
+                encoded_tokens.append(self.word2id[all_tokens[i]])
+                if(all_tokens[i] == "&"): # 5 concatenations before we get to lists of sampled values
+                    num_concat += 1
+            except KeyError: # Numerical values
+                if(isinstance(all_tokens[i], str)):
+                    for v in all_tokens[i]:
+                        try:
+                            encoded_tokens.append(self.word2id[v])
+                        except KeyError:
+                            print(all_tokens)
+                            raise
+                    if(num_concat >= 5): # We're in a list of sampled parameters
+                        encoded_tokens.append(self.word2id[","])
+                else:
+                    raise KeyError("Unrecognized token: {}".format(all_tokens[i]))
+
+        return encoded_tokens
+
+    def _one_hot_encode(self, tokens):
+        encoding = np.zeros((len(tokens), len(self.WORDS)+1))
+        encoding[range(tokens.shape[0]), tokens] = 1
+        return encoding
+
+    def __len__(self):
+        if(self.train_style == 'fixed_future'):
+            return len(self.data_list)
+        elif(self.train_style in ['next_step', 'arbitrary_step']):
+            #if(len(self.all_tokens.shape) == 3):
+            if(self.augment and self.ssl):
+                return len(self.available_idxs)
+            elif(self.augment):
+                return len(self.all_tokens_map)
+            else:
+                return len(self.available_idxs)
+        elif(self.train_style == 'rollout'):
+            return len(self.available_idxs)
+
+    def pretrain(self):
+        self._pretrain_tokens = True
+
+    def pretrain_off(self):
+        self._pretrain_tokens = False
+
+    def __getitem__(self, idx):
+        '''
+        idx samples the file.
+        Need to figure out a way to sample the snapshots within the file...
+        '''
+        #print("\n\nHERE\n\n")
+        #print("\nHERE\n")
+        # Everything is precomputed
+        if(self.train_style == 'fixed_future'):
+            if(self.return_text):
+                #print(self.all_tokens.shape)
+                #print(idx)
+                #raise
+                #sim_num = sim_idx // self.data.shape[1] # Get simulation number
+                #sim_time = sim_idx % self.data.shape[1] # Get time from that simulation
+                #TODO Need to fix tokens
+                if(self.clip):
+                    return self.data[idx][:self.initial_step], \
+                           self.data[idx][self.sim_time][...,np.newaxis], \
+                           self.grid[idx], \
+                           self.all_tokens[idx].to(device=device), \
+                           self.time[idx][self.sim_time], \
+                           self.sentence_embeddings[idx]
+                else:
+                    return self.data[idx][:self.initial_step], \
+                           self.data[idx][self.sim_time][...,np.newaxis], \
+                           self.grid[idx], \
+                           self.all_tokens[idx].to(device=device), \
+                           self.time[idx][self.sim_time],
+                #raise
+                #return self.data[idx][:self.initial_step,...][...,np.newaxis], \
+                #       self.data[idx][self.sim_time][...,np.newaxis], \
+                #       self.grid[idx][...,np.newaxis], \
+                #       self.time_included_tokens[idx]
+            else:
+                return self.data[idx][...,:self.initial_step,:], \
+                       self.data[idx][self.sim_time], \
+                       self.grid[udx][self.sim_time]
+
+        # Need to slice according to available data
+        elif(self.train_style == 'next_step'):
+            sim_idx = self.available_idxs[idx]      # Get valid prestored index
+            #sim_idx = idx      # Get valid prestored index
+            sim_num = sim_idx // self.data.shape[1] # Get simulation number
+            sim_time = sim_idx % self.data.shape[1] # Get time from that simulation
+
+            if(self.return_text):
+                #print(len(self.all_data_list))
+                #print(self.all_data_list)
+                #print(np.array(self.all_data_list).flatten())
+                #print(self.all_data_list[sim_num])
+                #print(self.all_operator_maps[sim_num])
+                #print(self.data.shape)
+                #raise
+                if(self.clip):
+                    if(self._pretrain_tokens):
+                        return self.data[sim_num][sim_time-self.initial_step:sim_time], \
+                           self.data[sim_num][sim_time][...,np.newaxis], \
+                           self.grid[sim_num], \
+                           self.all_tokens[idx].to(device=device), \
+                           self.time[sim_num][sim_time] - self.time[sim_num][sim_time-1], \
+                           self.all_operator_maps[sim_num], \
+                           self.sentence_embeddings[sim_num]
+                    else:
+                        return self.data[sim_num][sim_time-self.initial_step:sim_time], \
+                           self.data[sim_num][sim_time][...,np.newaxis], \
+                           self.grid[sim_num], \
+                           self.all_tokens[idx].to(device=device), \
+                           self.time[sim_num][sim_time] - self.time[sim_num][sim_time-1], \
+                           self.sentence_embeddings[sim_num]
+                           #self.data[sim_num][sim_time-self.initial_step:sim_time,...][...,np.newaxis]
+                else:
+                    if(self._pretrain_tokens):
+                        return self.data[sim_num][sim_time-self.initial_step:sim_time], \
+                           self.data[sim_num][sim_time][...,np.newaxis], \
+                           self.grid[sim_num], \
+                           self.all_tokens[idx].to(device=device), \
+                           self.time[sim_num][sim_time] - self.time[sim_num][sim_time-1], \
+                           self.all_operator_maps[sim_num]
+                    else:
+                        return self.data[sim_num][sim_time-self.initial_step:sim_time], \
+                           self.data[sim_num][sim_time][...,np.newaxis], \
+                           self.grid[sim_num], \
+                           self.all_tokens[idx].to(device=device), \
+                           self.time[sim_num][sim_time] - self.time[sim_num][sim_time-1]#, \
+                           #self.data[sim_num][sim_time-self.initial_step:sim_time,...][...,np.newaxis]
+            else:
+                #print()
+                #print(sim_time-1)
+                #print(sim_time - self.initial_step,sim_time)
+                #print(self.data[sim_num][sim_time - self.initial_step:sim_time].shape)
+                #print(self.data[sim_num][sim_time][np.newaxis].shape)
+                #print(self.grid[sim_num][np.newaxis].shape)
+                #print()
+                #print(self.data.shape)
+                #print(idx, sim_idx, sim_num, sim_time, self.data.shape[1])
+                if(sim_time == 0):
+                    raise ValueError("WHOOPSIE")
+                return self.data[sim_num][sim_time - self.initial_step:sim_time], \
+                               self.data[sim_num][sim_time][np.newaxis], \
+                               self.grid[sim_num][np.newaxis]
+                           #self.all_tokens[idx].to(device=device), \
+                           #self.time[sim_num][sim_time] - self.time[sim_num][sim_time-1]#, \
+                           #self.data[sim_num][sim_time-self.initial_step:sim_time,...][...,np.newaxis]
+                #return self.data[sim_num][sim_time-self.initial_step:sim_time,...][...,np.newaxis], \
+                #       self.data[sim_num][sim_time][...,np.newaxis], \
+                #       self.grid[sim_num][...,np.newaxis]
+
+        elif(self.train_style == 'arbitrary_step'):
+            if(self.ssl and self.augment):
+                #TODO Random valid equation sample...
+                # have idxs in
+                pass
+            if(self.augment):
+                idx = idx#//self.all_tokens.shape[0]
+                sim_idx = self.all_tokens_map[idx]
+                #token_aug = idx#%self.all_tokens.shape[0]
+            else:
+                sim_idx = self.available_idxs[idx]      # Get valid prestored index
+            #sim_idx = idx      # Get valid prestored index
+            sim_num = sim_idx // self.data.shape[1] # Get simulation number
+            sim_time = sim_idx % self.data.shape[1] # Get time from that simulation
+
+            if(self.return_text):
+                if(self.forcing):
+                    return self.data[sim_num][0], \
+                           self.data[sim_num][sim_time][...,np.newaxis], \
+                           self.grid[sim_num], \
+                           self.all_tokens[idx].to(device=device), \
+                           self.forcing_terms[idx], \
+                           self.times[idx]
+                else:
+                    if(self.ssl):
+                        return self.data[sim_num][0], \
+                           self.data[sim_num][sim_time][...,np.newaxis], \
+                           self.grid[sim_num], \
+                           self.all_tokens[idx].to(device=device), \
+                           self.time[sim_num][sim_time], \
+                           self.data[sim_num][sim_time-self.initial_step:sim_time,...][...,np.newaxis]
+                           #self.all_tokens[self.available_idxs.index(idx)].to(device=device)
+                    else:
+                        #print(self.available_idxs)
+                        #print("SIM NUM: {}".format(sim_num))
+                        #print("SIM TIME: {}".format(sim_time))
+                        return self.data[sim_num][0], \
+                           self.data[sim_num][sim_time][...,np.newaxis], \
+                           self.grid[sim_num], \
+                           self.all_tokens[idx].to(device=device), \
+                           self.time[sim_num][sim_time]# - self.time[sim_num][sim_time-1]#, \
+                           #self.data[sim_num][sim_time-self.initial_step:sim_time,...][...,np.newaxis]
+            else:
+                return self.data[sim_num][sim_time-self.initial_step:sim_time,...][...,np.newaxis], \
+                       self.data[sim_num][sim_time][...,np.newaxis], \
+                       self.grid[sim_num][...,np.newaxis]
+
+        # Need to slice according ot available data and rollout
+        elif(self.train_style == 'rollout'):
+            sim_idx = self.available_idxs[idx]      # Get valid prestored index
+            sim_num = sim_idx // self.data.shape[1] # Get simulation number
+            sim_time = sim_idx % self.data.shape[1] # Get time from that simulation
+            if(self.return_text):
+                # Add additional times to text encoding.
+                slice_times = self.time[sim_num][sim_time-self.initial_step:sim_time+self.rollout_length] # Get times
+                #print(sim_time, sim_time - self.initial_step, sim_time + self.rollout_length, self.initial_step, self.rollout_length)
+                slice_tokens = torch.empty((len(slice_times), 15))
+                for idx, st in enumerate(slice_times):
+                    # Loses a very small amount of precision
+                    # Need predefined tensor
+                    slce = self._encode_tokens("&" + str(st))
+                    if(len(slce) < 15):
+                        slce.extend([20.]*(15-len(slce)))
+                    slice_tokens[idx] = torch.Tensor(slce)[:15].to(device=device)#.cuda()
+
+                # This goes into ssl training loop.
+                return_tokens = self.tokens[sim_num].copy()
+                return_tokens.extend([len(self.WORDS)]*(500 - len(return_tokens)))
+                return_tokens = torch.Tensor(return_tokens)
+                return_tokens = return_tokens.repeat(self.rollout_length, 1)
+                slice_tokens = torch.swapaxes(slice_tokens.unfold(0, 10, 1)[:-1], 1, 2).reshape(self.rollout_length, -1)
+                all_tokens = torch.cat((return_tokens, slice_tokens), dim=1)
+
+                # Most processing happens in the training loop
+                return self.data[sim_num][sim_time-self.initial_step:sim_time+self.rollout_length,...][...,np.newaxis], \
+                       self.data[sim_num][sim_time:sim_time+self.rollout_length][...,np.newaxis], \
+                       self.grid[sim_num][...,np.newaxis], \
+                       all_tokens
+                       #return_tokens, slice_tokens
+            else:
+                return self.data[sim_num][sim_time-self.initial_step:sim_time,...][...,np.newaxis], \
+                       self.data[sim_num][sim_time:sim_time+self.rollout_length], \
+                       self.grid[sim_num][...,np.newaxis]
+
+
 class TransformerOperatorDataset2D(Dataset):
     def __init__(self, f, 
                  initial_step=10,
@@ -636,7 +1118,8 @@ class TransformerOperatorDataset2D(Dataset):
                  rollout_length=10,
                  split_style='equation',
                  samples_per_equation=111,
-                 seed=0
+                 seed=0,
+                 clip=False,
                  ):
         """
         
@@ -656,6 +1139,12 @@ class TransformerOperatorDataset2D(Dataset):
         self.rollout_length = rollout_length
         self.split_style = split_style
         self.samples_per_equation = samples_per_equation
+
+        # Use LLM if CLIP
+        self.clip = clip
+        if(self.clip):
+            self.sentence_embedder = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
+            self.sentence_embeddings = []
         
         # Extract list of seeds
         self.data_list = list(f.keys())
@@ -694,8 +1183,6 @@ class TransformerOperatorDataset2D(Dataset):
         self.idxs = idxs[:num_samples]
 
         # Split indices into
-        #print(idxs)
-        #raise
         if(self.split_style == 'equation'):
             train_idx = int(num_samples * (1 - test_ratio - val_ratio))
             val_idx = int(num_samples * (1-test_ratio))
@@ -707,8 +1194,6 @@ class TransformerOperatorDataset2D(Dataset):
                 self.idxs = self.idxs[val_idx:num_samples]
             else:
                 raise ValueError("Select train, val, or test split. {} is invalid.".format(split))
-        #print(self.idx)
-
 
         self.data = []
         self.grid = []
@@ -717,26 +1202,15 @@ class TransformerOperatorDataset2D(Dataset):
         self.temp_tokens = []
         self.available_idxs = []
         self.data_list = np.array(self.data_list)[self.idxs]
-        #self.data_list = np.array([self.data_list[0]])
-        #print(self.data_list)
-        #self.data = torch.empty((40,200,64,64,201)).float()
-        #self.data = torch.empty((len(self.data_list),200,64,64,201)).float()
-        #print(vars(self.h5_file))
-        #print(self.h5_file.filename)
         if('10s' in self.h5_file.filename):
             self.data = torch.empty((len(self.data_list),self.samples_per_equation,64,64,201)).float()
         elif('30s' in self.h5_file.filename):
             self.data = torch.empty((len(self.data_list),self.samples_per_equation,64,64,121)).float()
         elif('1s' in self.h5_file.filename):
-            #print(len(self.data_list))
             self.data = torch.empty((len(self.data_list),self.samples_per_equation,64,64,201)).float()
-            #raise
         for i in tqdm(range(len(self.data_list))):
             seed_group = self.h5_file[self.data_list[i]]
-            #data = seed_group['u'][:]
             data = seed_group['u'][:][:,::reduced_resolution,::reduced_resolution,...]
-            #print(data.shape)
-            #raise
 
             # Get extra info
             base_tokens = seed_group['tokens'][:]
@@ -746,12 +1220,7 @@ class TransformerOperatorDataset2D(Dataset):
 
             # Add initial condition
             complete_data = np.concatenate((w0, data), axis=3)
-            #self.data.append(torch.Tensor(complete_data).clone())
-            #complete_data = complete_data[...,:101]
-            #print(complete_data.shape)
-            #raise
             self.data[i] = torch.Tensor(complete_data[:self.samples_per_equation])
-            #print(complete_data.shape)
 
             # Add initial time
             time = list(seed_group['t'][:])
@@ -762,19 +1231,9 @@ class TransformerOperatorDataset2D(Dataset):
             self.grid.append(np.dstack((x,y)))
 
             # Get tokens
-            #print(base_tokens)
-            # Correct for small issue.
             base_tokens[38] = 12
-            #base_tokens = torch.cat((base_tokens[:33], torch.Tensor([16]), base_tokens[33:]))
             base_tokens = np.insert(base_tokens, 34, 16)
-            #base_tokens[8] = 11
-            #base_tokens[17] = 11
-            #base_tokens[35] = 11
-            #print(base_tokens)
-            #raise
-            #raise
             self.temp_tokens.append(base_tokens)
-            #print("\nGOT SAMPLE {}\n".format(i))
             del complete_data
 
         # Arrange data
@@ -783,15 +1242,9 @@ class TransformerOperatorDataset2D(Dataset):
         self.data = torch.swapaxes(self.data, 3, 4)
         print("\n\nDATA SHAPE:")
         print(self.data.shape)
-        #print()
-        #print()
-        #raise
 
         # Get valid indices for returning data
-        #print("Getting available idxs...")
         self.available_idxs = []
-        #print(len(self.data_list))
-        #raise
         if(self.train_style in ['next_step', 'arbitrary_step']):
             for i in tqdm(range(len(self.data_list))):
                 if(self.train_style == 'next_step'):
@@ -824,6 +1277,15 @@ class TransformerOperatorDataset2D(Dataset):
         self.tokens = []
         self.tokens = torch.empty(len(self.time), self.data.shape[1], 100)
         for idx, token in enumerate(self.temp_tokens):
+            if(self.clip):
+                split_d = self.data_list[idx].split("_")
+                reynolds = self.data[idx].abs().max()/float(split_d[0])
+                sentence = "2D Simulation of Navier-Stokes Equations with a viscosity coefficient of {}.".format(split_d[0])
+                sentence += " The forcing term is sinusoidal with amplitude {}.".format(split_d[1])
+                sentence += " They Reynolds number is {}.".format(reynolds)
+                sentence += " There are periodic boundary conditions."
+                self.sentence_embeddings.append(self.sentence_embedder.encode(sentence))
+            
             for jdx, time in enumerate(self.time[idx]):
 
                 # Tokenize time
@@ -842,6 +1304,8 @@ class TransformerOperatorDataset2D(Dataset):
         # Time and tokens to tensors
         self.time = torch.Tensor(np.array(self.time))
         self.tokens = torch.Tensor(self.tokens)
+        if(self.clip):
+            self.sentence_embeddings = torch.Tensor(np.array(self.sentence_embeddings))
 
         if(self.split_style == 'initial_condition'):
             #train_idx = int(len(self.available_idxs) * (1 - test_ratio - val_ratio))
@@ -875,44 +1339,47 @@ class TransformerOperatorDataset2D(Dataset):
         dt = self.time[0][1] - self.time[0][0] # TODO Assumes single timestep
         if(self.split_style == 'initial_condition'):
             if(self.train_style == 'next_step'):
-                #for idx in range(len(self.idxs)):
                 for idx in self.idxs:
-                    #print(self.idxs)
-                    #print(self.data.shape)
-                    #raise
                     for jdx in range(self.initial_step, self.data.shape[1]):
-                    #for jdx in range(self.initial_step, 101):
-                        #idx = self.idx_to_avail_map[self.idxs[idx]]
 
                         #print(self.data.shape)
                         sim_idx = self.available_idxs[idx]
                         sim_num = sim_idx // self.data.shape[1] # Get simulation number
                         sim_time = sim_idx % self.data.shape[1] # Get time from that simulation
 
-                        self.data_tuples.append((self.data[idx][jdx-self.initial_step:jdx],
+                        if(self.clip):
+                            self.data_tuples.append((self.data[idx][jdx-self.initial_step:jdx],
+                                self.data[idx][jdx][...,np.newaxis],
+                                self.grid[idx//self.samples_per_equation],
+                                self.tokens[idx//self.samples_per_equation][jdx], dt, self.sentence_embeddings[sim_num]))
+                        else:
+                            self.data_tuples.append((self.data[idx][jdx-self.initial_step:jdx],
                                 self.data[idx][jdx][...,np.newaxis],
                                 self.grid[idx//self.samples_per_equation],
                                 self.tokens[idx//self.samples_per_equation][jdx], dt))
-                                #self.time[sim_num][sim_time] - self.time[sim_num][sim_time-1]))
-                        #self.data_tuples.append((self.data[sim_num][sim_time-self.initial_step:sim_time],
-                        #        self.data[sim_num][sim_time][...,np.newaxis],
-                        #        self.grid[sim_num],
-                        #        self.tokens[sim_num][sim_time],
-                        #        self.time[sim_num][sim_time] - self.time[sim_num][sim_time-1]))
             elif(self.train_style == 'fixed_future'):
-                #for idx in tqdm(range(self.data.shape[0])):
                 for idx in tqdm(self.idxs):
                     sim_num = idx // self.data.shape[1] # Get simulation number
                     sim_time = idx % self.data.shape[1] # Get time from
-                    #print(idx, sim_num, sim_time, self.data.shape)
-                    self.data_tuples.append((
-                        self.data[idx][:self.initial_step],
-                        self.data[idx][self.sim_time].unsqueeze(-1),
-                        self.grid[sim_num],
-                        self.tokens[sim_num][self.sim_time],
-                        self.time[sim_num][self.sim_time] - \
-                                self.time[sim_num][self.sim_time-1]
-                    ))
+                    if(self.clip):
+                        self.data_tuples.append((
+                            self.data[idx][:self.initial_step],
+                            self.data[idx][self.sim_time].unsqueeze(-1),
+                            self.grid[sim_num],
+                            self.tokens[sim_num][self.sim_time],
+                            self.time[sim_num][self.sim_time] - \
+                                    self.time[sim_num][self.sim_time-1],
+                            self.sentence_embeddings[sim_num]
+                        ))
+                    else:
+                        self.data_tuples.append((
+                            self.data[idx][:self.initial_step],
+                            self.data[idx][self.sim_time].unsqueeze(-1),
+                            self.grid[sim_num],
+                            self.tokens[sim_num][self.sim_time],
+                            self.time[sim_num][self.sim_time] - \
+                                    self.time[sim_num][self.sim_time-1]
+                        ))
 
             del self.data
             del self.tokens
@@ -949,7 +1416,6 @@ class TransformerOperatorDataset2D(Dataset):
     def __len__(self):
         if(self.train_style == 'fixed_future'):
             if(self.split_style == 'equation'):
-                print(len(self.available_idxs))
                 return len(self.available_idxs)
             else:
                 return len(self.data_tuples)
@@ -975,7 +1441,6 @@ class TransformerOperatorDataset2D(Dataset):
         sim_time = sim_idx % self.data.shape[1] # Get time from that simulation
         if(self.train_style == "next_step"):
             if(self.return_text):
-                #print(sim_idx, sim_num, sim_time)
                 return self.data[sim_num][sim_time-self.initial_step:sim_time], \
                         self.data[sim_num][sim_time][...,np.newaxis], \
                         self.grid[sim_num//2], \
@@ -987,8 +1452,6 @@ class TransformerOperatorDataset2D(Dataset):
                        self.grid[udx][self.sim_time]
 
         elif(self.train_style == 'fixed_future'):
-            #print(self.time[0][:self.initial_step], self.time[0][self.sim_time])
-            #raise
             if(self.return_text):
                 return self.data[sim_num][:self.initial_step], \
                         self.data[sim_num][self.sim_time][...,np.newaxis], \

@@ -15,6 +15,8 @@ import shutil
 
 from models.pitt import StandardPhysicsInformedTokenTransformer2D
 from models.pitt import PhysicsInformedTokenTransformer2D
+from models.pitt import CLIPPhysicsInformedTokenTransformer2D
+from models.pitt import CLIPTransformer2D
 
 from models.oformer import OFormer2D, SpatialTemporalEncoder2D, STDecoder2D, PointWiseDecoder2D
 from models.deeponet import DeepONet2D
@@ -91,7 +93,7 @@ def evaluate(test_loader, transformer, loss_fn, config=None):
     with torch.no_grad():
         transformer.eval()
         test_loss = 0
-        for bn, (x0, y, grid, tokens, t) in enumerate(test_loader):
+        for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(test_loader):
             # Forward pass: compute predictions by passing the input sequence
             # through the transformer.
 
@@ -121,7 +123,7 @@ def generate_square_subsequent_mask(sz: int):
     return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
 
 
-def get_data(f, config):
+def get_data(f, config, pretraining=False):
     if('electric' in config['data_name']):
         f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
         print("\nTRAINING DATA")
@@ -195,7 +197,8 @@ def get_data(f, config):
                                 train_style=config['train_style'],
                                 split_style=config['split_style'],
                                 samples_per_equation=config['samples_per_equation'],
-                                seed=config['seed']
+                                seed=config['seed'],
+                                clip=config['embedding'] == 'clip',
         )
         print("\nVALIDATION DATA")
         f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
@@ -214,7 +217,8 @@ def get_data(f, config):
                                 train_style=config['train_style'],
                                 split_style=config['split_style'],
                                 samples_per_equation=config['samples_per_equation'],
-                                seed=config['seed']
+                                seed=config['seed'],
+                                clip=config['embedding'] == 'clip',
         )
         print("\nTEST DATA")
         f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
@@ -233,7 +237,8 @@ def get_data(f, config):
                                 train_style=config['train_style'],
                                 split_style=config['split_style'],
                                 samples_per_equation=config['samples_per_equation'],
-                                seed=config['seed']
+                                seed=config['seed'],
+                                clip=config['embedding'] == 'clip',
         )
 
     # Check against data leaks
@@ -254,12 +259,19 @@ def get_data(f, config):
     else:
         raise ValueError("Invalid splitting style. Select initial_condition or equation")
 
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=config['batch_size'], generator=torch.Generator(device='cuda'),
+    batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
                                                num_workers=config['num_workers'], shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_data, batch_size=config['batch_size'], generator=torch.Generator(device='cuda'),
+    val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
                                              num_workers=config['num_workers'], shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=config['batch_size'],
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size,
                                              num_workers=config['num_workers'], shuffle=False)
+    #train_loader = torch.utils.data.DataLoader(train_data, batch_size=config['batch_size'], generator=torch.Generator(device='cuda'),
+    #                                           num_workers=config['num_workers'], shuffle=True)
+    #val_loader = torch.utils.data.DataLoader(val_data, batch_size=config['batch_size'], generator=torch.Generator(device='cuda'),
+    #                                         num_workers=config['num_workers'], shuffle=True)
+    #test_loader = torch.utils.data.DataLoader(test_data, batch_size=config['batch_size'],
+    #                                         num_workers=config['num_workers'], shuffle=False)
     return train_loader, val_loader, test_loader
 
 
@@ -299,19 +311,171 @@ def get_transformer(model_name, config):
         transformer = PhysicsInformedTokenTransformer2D(100, config['hidden'], config['layers'], config['heads'],
                                         output_dim1=config['num_x'], output_dim2=config['num_y'], dropout=config['dropout'],
                                         neural_operator=neural_operator).to(device=device)
+    elif(config['embedding'] == "clip"):
+        print("\n USING CLIP EMBEDDING")
+        neural_operator = get_neural_operator(config['neural_operator'], config)
+        temporal_neural_operator = get_neural_operator(config['neural_operator'], config)
+        #transformer = CLIPPhysicsInformedTokenTransformer2D(100, config['hidden'], config['layers'], config['heads'],
+        transformer = CLIPTransformer2D(100, config['hidden'], config['layers'], config['heads'],
+                                        output_dim1=config['num_x'], output_dim2=config['num_y'], dropout=config['dropout'],
+                                        neural_operator=neural_operator, temporal_neural_operator=temporal_neural_operator).to(device=device)
     else:
         raise ValueError("Invalid embedding choice.")
     return transformer
 
 
-def run_training(config, prefix):
+def run_pretraining(config, prefix):
+    #prefix = config['data_name'].split("_")[0]
+    path = "{}{}_{}_{}".format(config['results_dir'], config['model'], config['neural_operator'], prefix)
+    f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
+    model_name = 'pretraining_{}'.format(config['model']) + "_{}.pt".format(seed)
+    model_path = path + "/" + model_name
 
-    #print(f'Epochs = {epochs}, learning rate = {learning_rate}, scheduler step = {scheduler_step}    , scheduler gamma = {scheduler_gamma}')
+    # Create the transformer model.
+    transformer = get_transformer(config['model'], config)
+    if(config['pretraining_epochs'] == 0):
+        print("\nNO PRETRAINING\n")
+        return transformer
+
+    total_params = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
+    print(f'Total parameters = {total_params}')
+
+    # Get data as loaders
+    train_loader, val_loader, test_loader = get_data(f, config, pretraining=True)
 
     ################################################################
-    # load data
+    # training and evaluation
     ################################################################
 
+    if(config['return_text']):
+        _data, _, _, _, _, _ = next(iter(val_loader))
+    else:
+        _data, _, _ = next(iter(val_loader))
+    dimensions = len(_data.shape)
+    print('Spatial Dimension', dimensions - 3)
+
+    
+    # Use Adam as the optimizer.
+    optimizer = torch.optim.Adam(transformer.parameters(), lr=config['pretraining_learning_rate'],
+                                 weight_decay=config['pretraining_weight_decay'])
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=config['pretraining_learning_rate'],# div_factor=1e6,
+                                                    steps_per_epoch=len(train_loader), epochs=config['pretraining_epochs'])
+    
+    # Use mean squared error as the loss function.
+    loss_fn = nn.L1Loss(reduction='mean')
+    clip_loss_fn = nn.CrossEntropyLoss(reduction='mean')
+    
+    # Train the transformer for the specified number of epochs.
+    train_losses = []
+    val_losses = []
+    loss_val_min = np.infty
+    #src_mask = generate_square_subsequent_mask(640).cuda()
+    lrs = []
+    shift = 0
+    print("\nPRETRAINNIG...")
+    for epoch in tqdm(range(config['pretraining_epochs'])):
+        # Iterate over the training dataset.
+        train_loss = 0
+        times = []
+        max_val = 0
+        transformer.train()
+        for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(train_loader):
+            start = time.time()
+
+            # Put data on correct device
+            x0 = x0.to(device).float()
+            y = y.to(device).float()
+            tokens = tokens.to(device).float()
+            t = t.to(device).float()
+            grid = grid.to(device).float()
+            sentence_embeddings = sentence_embeddings.to(device).float()
+
+            # Rearrange data
+            if(not('electric' in config['data_name'])):
+                x0 = torch.swapaxes(x0, 1, 3)
+                x0 = torch.swapaxes(x0, 1, 2)
+
+            # Forward pass
+            y_pred = transformer(grid, tokens, x0, t, sentence_embeddings, True, bn)
+
+            labels = torch.arange(y_pred.shape[1]).to(device).repeat(y_pred.shape[0], 1)
+            loss = clip_loss_fn(y_pred, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+
+            scheduler.step()
+
+        train_loss /= (bn + 1)
+        train_losses.append(train_loss)
+
+        with torch.no_grad():
+            transformer.eval()
+            val_loss = 0
+            all_val_preds = []
+            for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(val_loader):
+                # Forward pass: compute predictions by passing the input sequence
+                # through the transformer.
+                # Put data on correct device
+                x0 = x0.to(device).float()
+                y = y.to(device).float()
+                tokens = tokens.to(device).float()
+                t = t.to(device).float()
+                grid = grid.to(device).float()
+
+                # Rearrange data
+                if(not('electric' in config['data_name'])):
+                    x0 = torch.swapaxes(x0, 1, 3)
+                    x0 = torch.swapaxes(x0, 1, 2)
+
+                y_pred = transformer(grid, tokens, x0, t, sentence_embeddings, True)
+
+                labels = torch.arange(y_pred.shape[1]).to(device).repeat(y_pred.shape[0], 1)
+                loss = clip_loss_fn(y_pred, labels)
+                val_loss += loss.item()
+
+                #y = y[...,0].to(device=device)#.cuda()
+                #if(bn == 0):
+                #    y_val_true = y.clone()
+                #    y_val_pred = y_pred.clone()
+                #all_val_preds.append(y_pred.detach())
+    
+                ## Compute the loss.
+                #val_loss += loss_fn(y_pred, y).item()
+
+            if  val_loss < loss_val_min:
+                loss_val_min = val_loss
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': transformer.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': loss_val_min
+                    }, model_path)
+
+        val_loss /= (bn + 1)
+        val_losses.append(val_loss)
+
+        # Print the loss at the end of each epoch.
+        if(epoch%config['log_freq'] == 0):
+            np.save("./{}/pretraining_train_l2s_{}.npy".format(path, seed), train_losses)
+            np.save("./{}/pretraining_val_l2s_{}.npy".format(path, seed), val_losses)
+            np.save("./{}/pretraining_lrs_{}.npy".format(path, seed), lrs)
+            print(f"Epoch {epoch+1}: loss = {train_loss:.6f}\t val loss = {val_loss:.6f}")
+
+    test_vals = []
+    test_value = evaluate(test_loader, transformer, loss_fn, config=config)
+    test_vals.append(test_value)
+    print("TEST VALUE FROM LAST EPOCH: {0:5f}".format(test_value))
+    transformer.load_state_dict(torch.load(model_path)['model_state_dict'])
+    test_value = evaluate(test_loader, transformer, loss_fn, config=config)
+    test_vals.append(test_value)
+    print("TEST VALUE BEST LAST EPOCH: {0:5f}".format(test_value))
+    np.save("{}{}_{}_{}/pretraining_test_vals_{}.npy".format(config['results_dir'], config['model'], config['neural_operator'], prefix, seed), test_vals)
+    return transformer
+
+
+def run_training(transformer, config, prefix):
     #prefix = config['data_name'].split("_")[0]
     path = "{}{}_{}_{}".format(config['results_dir'], config['model'], config['neural_operator'], prefix)
     f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
@@ -319,7 +483,7 @@ def run_training(config, prefix):
     model_path = path + "/" + model_name
 
     # Create the transformer model.
-    transformer = get_transformer(config['model'], config)
+    #transformer = get_transformer(config['model'], config)
 
     total_params = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
     print(f'Total parameters = {total_params}')
@@ -332,7 +496,7 @@ def run_training(config, prefix):
     ################################################################
 
     if(config['return_text']):
-        _data, _, _, _, _ = next(iter(val_loader))
+        _data, _, _, _, _, _ = next(iter(val_loader))
     else:
         _data, _, _ = next(iter(val_loader))
     dimensions = len(_data.shape)
@@ -354,13 +518,14 @@ def run_training(config, prefix):
     #src_mask = generate_square_subsequent_mask(640).cuda()
     lrs = []
     shift = 0
+    print("\nTRAINING...")
     for epoch in tqdm(range(config['epochs'])):
         # Iterate over the training dataset.
         train_loss = 0
         times = []
         max_val = 0
         transformer.train()
-        for bn, (x0, y, grid, tokens, t) in enumerate(train_loader):
+        for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(train_loader):
             start = time.time()
 
             # Put data on correct device
@@ -397,58 +562,6 @@ def run_training(config, prefix):
 
             scheduler.step()
 
-
-            #if(bn%100 == 0 and len(train_loader) >= 1000):
-            #    print("Batch: {0}\tloss = {1:.4f}".format(bn, train_loss/(bn+1)))
-            #    fig, ax = plt.subplots(ncols=3, nrows=2, figsize=(22,15))
-            #    im0 = ax[0][0].imshow(transformer.query_matrix.detach().cpu()[0], cmap='bwr')
-            #    divider = make_axes_locatable(ax[0][0])
-            #    cax = divider.append_axes('right', size='5%', pad=0.05)
-            #    fig.colorbar(im0, cax=cax, orientation='vertical')
-
-            #    im1 = ax[0][1].imshow(transformer.key_matrix.detach().cpu()[0], cmap='bwr')
-            #    divider = make_axes_locatable(ax[0][1])
-            #    cax = divider.append_axes('right', size='5%', pad=0.05)
-            #    fig.colorbar(im1, cax=cax, orientation='vertical')
-
-            #    prod_mat = torch.mul(transformer.query_matrix.detach().cpu()[0], transformer.key_matrix.detach().cpu()[0])
-            #    im2 = ax[0][2].imshow(prod_mat, vmin=prod_mat.mean()-prod_mat.std(), vmax=prod_mat.mean()+prod_mat.std(), cmap='bwr')
-            #    divider = make_axes_locatable(ax[0][2])
-            #    cax = divider.append_axes('right', size='5%', pad=0.05)
-            #    fig.colorbar(im2, cax=cax, orientation='vertical')
-
-            #    im3 = ax[1][0].imshow(transformer.q2_matrix.detach().cpu()[0], cmap='bwr')
-            #    divider = make_axes_locatable(ax[1][0])
-            #    cax = divider.append_axes('right', size='5%', pad=0.05)
-            #    fig.colorbar(im3, cax=cax, orientation='vertical')
-
-            #    im4 = ax[1][1].imshow(transformer.k2_matrix.detach().cpu()[0], cmap='bwr')
-            #    divider = make_axes_locatable(ax[1][1])
-            #    cax = divider.append_axes('right', size='5%', pad=0.05)
-            #    fig.colorbar(im4, cax=cax, orientation='vertical')
-
-            #    prod_mat2 = torch.mul(transformer.q2_matrix.detach().cpu()[0], transformer.k2_matrix.detach().cpu()[0])
-            #    im5 = ax[1][2].imshow(prod_mat2, vmin=prod_mat2.mean()-prod_mat2.std(), vmax=prod_mat2.mean()+prod_mat2.std(), cmap='bwr')
-            #    divider = make_axes_locatable(ax[1][2])
-            #    cax = divider.append_axes('right', size='5%', pad=0.05)
-            #    fig.colorbar(im5, cax=cax, orientation='vertical')
-            #    #raise
-            #    ax[0][0].set_title("Query Matrix", fontsize=20)
-            #    ax[0][1].set_title("Key Matrix", fontsize=20)
-            #    ax[0][2].set_title("Matrix Product", fontsize=20)
-
-            #    ax[0][0].set_ylabel("First Order Operator Matrices", fontsize=20)
-            #    ax[1][0].set_ylabel("Second Order Operator Matrices", fontsize=20)
-            #    #ax[2].imshow(transformer.v_embedding_layer.weight.detach().cpu().T)
-            #    plt.tight_layout()
-            #    #plt.savefig("./{}/weight_matrices_{}_{}.png".format(path, seed, epoch))
-            #    fname = str(bn)
-            #    while(len(fname) < 8):
-            #        fname = '0' + fname
-            #    plt.savefig("./{}/weight_matrices_{}_{}_{}.png".format(path, seed, epoch, fname))
-            #    plt.close()
-            #    #plt.show()
-
         train_loss /= (bn + 1)
         train_losses.append(train_loss)
 
@@ -456,7 +569,7 @@ def run_training(config, prefix):
             transformer.eval()
             val_loss = 0
             all_val_preds = []
-            for bn, (x0, y, grid, tokens, t) in enumerate(val_loader):
+            for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(val_loader):
                 # Forward pass: compute predictions by passing the input sequence
                 # through the transformer.
                 # Put data on correct device
@@ -503,55 +616,7 @@ def run_training(config, prefix):
         if(epoch%config['progress_plot_freq'] == 0 and len(y_train_true) >= 4):
             progress_plots(epoch, y_train_true, y_train_pred, y_val_true, y_val_pred, path, seed=seed)
 
-
-    try:
-        fig, ax = plt.subplots(ncols=3, nrows=2, figsize=(22,15))
-        im0 = ax[0][0].imshow(transformer.query_matrix.detach().cpu()[0])
-        divider = make_axes_locatable(ax[0][0])
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im0, cax=cax, orientation='vertical')
-
-        im1 = ax[0][1].imshow(transformer.key_matrix.detach().cpu()[0])
-        divider = make_axes_locatable(ax[0][1])
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im1, cax=cax, orientation='vertical')
-
-        prod_mat = torch.mul(transformer.query_matrix.detach().cpu()[0], transformer.key_matrix.detach().cpu()[0])
-        im2 = ax[0][2].imshow(prod_mat, vmin=prod_mat.mean()-prod_mat.std(), vmax=prod_mat.mean()+prod_mat.std())
-        divider = make_axes_locatable(ax[0][2])
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im2, cax=cax, orientation='vertical')
-
-        im3 = ax[1][0].imshow(transformer.q2_matrix.detach().cpu()[0])
-        divider = make_axes_locatable(ax[1][0])
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im3, cax=cax, orientation='vertical')
-
-        im4 = ax[1][1].imshow(transformer.k2_matrix.detach().cpu()[0])
-        divider = make_axes_locatable(ax[1][1])
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im4, cax=cax, orientation='vertical')
-
-        prod_mat2 = torch.mul(transformer.q2_matrix.detach().cpu()[0], transformer.k2_matrix.detach().cpu()[0])
-        im5 = ax[1][2].imshow(prod_mat2, vmin=prod_mat2.mean()-prod_mat2.std(), vmax=prod_mat2.mean()+prod_mat2.std())
-        divider = make_axes_locatable(ax[1][2])
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im5, cax=cax, orientation='vertical')
-        #raise
-        ax[0][0].set_title("Query Matrix", fontsize=20)
-        ax[0][1].set_title("Key Matrix", fontsize=20)
-        ax[0][2].set_title("Matrix Product", fontsize=20)
-
-        ax[0][0].set_ylabel("First Order Operator Matrices", fontsize=20)
-        ax[1][0].set_ylabel("Second Order Operator Matrices", fontsize=20)
-        #ax[2].imshow(transformer.v_embedding_layer.weight.detach().cpu().T)
-        plt.tight_layout()
-        plt.savefig("./{}/weight_matrices_{}.png".format(path, seed))
-        #plt.show()
-    except AttributeError:
-        pass
-    #raise
-    #progress_plots(epoch, y_train_true, y_train_pred, y_val_true, y_val_pred, path, seed=seed)
+    progress_plots(epoch, y_train_true, y_train_pred, y_val_true, y_val_pred, path, seed=seed)
     #val_plots(epoch, val_loader, all_val_preds, seed=seed)
 
     test_vals = []
@@ -571,7 +636,7 @@ if __name__ == '__main__':
 
     # Load config
     #raise
-    with open("./configs/2d_pitt_config.yaml", 'r') as stream:
+    with open("./configs/2d_clip_pitt_config.yaml", 'r') as stream:
         config = yaml.safe_load(stream)
 
     # Get arguments and get rid of unnecessary ones
@@ -582,10 +647,12 @@ if __name__ == '__main__':
     train_args['prefix'] = prefix
     os.makedirs("{}{}_{}_{}".format(train_args['results_dir'], train_args['model'], train_args['neural_operator'], prefix),
                 exist_ok=True)
-    shutil.copy("./configs/2d_pitt_config.yaml",
-                "{}{}_{}_{}/2d_pitt_config.yaml".format(train_args['results_dir'],
+    shutil.copy("./configs/2d_clip_pitt_config.yaml",
+                "{}{}_{}_{}/2d_clip_pitt_config.yaml".format(train_args['results_dir'],
                 train_args['model'], train_args['neural_operator'], prefix))
     shutil.copy("./plot_progress.py", "{}{}_{}_{}/plot_progress.py".format(train_args['results_dir'],
+                train_args['model'], train_args['neural_operator'], prefix))
+    shutil.copy("./pretrain_plot_progress.py", "{}{}_{}_{}/pretrain_plot_progress.py".format(train_args['results_dir'],
                 train_args['model'], train_args['neural_operator'], prefix))
 
 
@@ -594,5 +661,6 @@ if __name__ == '__main__':
         torch.manual_seed(seed)
         np.random.seed(seed)
         train_args['seed'] = seed
-        run_training(train_args, prefix)
+        model = run_pretraining(train_args, prefix)
+        run_training(model, train_args, prefix)
     
