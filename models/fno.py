@@ -273,6 +273,136 @@ class FNO2d(nn.Module):
         return y_pred, loss_fn(y_pred, y)
     
 
+class CLIPFNO2d(nn.Module):
+    def __init__(self, num_channels, modes1=12, modes2=12, width=20, initial_step=10, dropout=0.1, embed_dim=32):
+        super(CLIPFNO2d, self).__init__()
+
+        """
+        The overall network. It contains 4 layers of the Fourier layer.
+        1. Lift the input to the desire channel dimension by self.fc0 .
+        2. 4 layers of the integral operators u' = (W + K)(u).
+            W defined by self.w; K defined by self.conv .
+        3. Project from the channel space to the output space by self.fc1 and self.fc2 .
+        
+        input: the solution of the previous 10 timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
+        input shape: (batchsize, x, y, c)
+        output: the solution of the next timestep
+        output shape: (batchsize, x, y, c)
+        """
+
+        self.modes1 = modes1
+        self.modes2 = modes2
+        self.width = width
+        self.padding = 2 # pad the domain if input is non-periodic
+
+        #self.fc0 = nn.Linear(initial_step*num_channels+2, self.width)
+        self.fc0 = nn.Linear(initial_step*num_channels+2+1, self.width)
+        #self.fc0_finetune = nn.Linear(initial_step*num_channels+2+1, self.width)
+
+        # input channel is 12: the solution of the previous 10 timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
+
+        self.conv0 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
+        self.conv0_finetune = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+        self.conv1 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
+        self.conv2 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
+        self.conv3 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
+        self.w0 = nn.Conv2d(self.width, self.width, 1)
+        self.w1 = nn.Conv2d(self.width, self.width, 1)
+        self.w2 = nn.Conv2d(self.width, self.width, 1)
+        self.w3 = nn.Conv2d(self.width, self.width, 1)
+
+        self.fc1 = nn.Linear(self.width, 128)
+        self.fc2 = nn.Linear(128, num_channels)
+        self.dropout = nn.Dropout(dropout)
+
+        self.sentence_proj = nn.Sequential(
+                                 nn.Linear(384, embed_dim),
+                                 nn.ReLU(),
+                                 nn.Linear(embed_dim, embed_dim),
+                                 nn.ReLU(),
+                                 nn.Linear(embed_dim, embed_dim//2)
+        )
+        self.x_proj = nn.Sequential(
+                                 #nn.Linear(32**3, embed_dim),
+                                 nn.Linear((initial_step*num_channels+2)*32*32, embed_dim),
+                                 #nn.Linear(32*34*34, embed_dim),
+                                 #nn.Linear(32**2, embed_dim),
+                                 nn.SiLU(),
+                                 nn.Linear(embed_dim, embed_dim),
+                                 nn.SiLU(),
+                                 nn.Linear(embed_dim, embed_dim//2)
+        )
+        self.proj_up = nn.Sequential(
+                                 nn.Linear(32, 128),
+                                 nn.SiLU(),
+                                 nn.Linear(128, 256),
+                                 nn.SiLU(),
+                                 nn.Linear(256, 32*32)
+        )
+
+
+    def forward(self, x, grid, sentence_embeddings, clip=False, return_embedding=False):
+        # x dim = [b, x1, x2, t*v]
+        x = torch.cat((x, grid), dim=-1)
+
+        # During pretraining get embedding from model output
+        x_emb = self.x_proj(x.flatten(1,3))
+        sentence_emb = self.sentence_proj(sentence_embeddings)
+        if(return_embedding):
+            return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1)
+        if(clip):
+            cross_corr = torch.bmm(x_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
+            return cross_corr
+        else:
+            #x_emb = self.x_proj(x.flatten(1,3))
+            #sentence_emb = self.sentence_proj(sentence_embeddings)
+            embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)#.detach()
+            embedding = self.proj_up(embedding)
+            #print(x.shape, embedding.shape)
+            #print(embedding.reshape((512, 32, 32, 1)).shape)
+            x = torch.cat((x, embedding.reshape((x.shape[0], 32, 32, 1))), dim=-1)
+            #print(x.shape)
+            #raise
+
+        x = self.fc0(x)
+        x = x.permute(0, 3, 1, 2)
+        
+        x = F.pad(x, [0, self.padding, 0, self.padding])
+        x = F.gelu(x)
+        x = self.dropout(x)
+
+        # Pad tensor with boundary condition
+        x1 = self.conv1(x)
+        x2 = self.w1(x)
+        x = x1 + x2
+        x = F.gelu(x)
+        x = self.dropout(x)
+
+        x1 = self.conv2(x)
+        x2 = self.w2(x)
+        x = x1 + x2
+        x = F.gelu(x)
+        x = self.dropout(x)
+
+        x1 = self.conv3(x)
+        x2 = self.w3(x)
+        x = x1 + x2
+
+        x = x[..., :-self.padding, :-self.padding] # Unpad the tensor
+        x = x.permute(0, 2, 3, 1)
+        x = self.fc1(x)
+        x = F.gelu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+
+        return x.unsqueeze(-2)
+
+
+    def get_loss(self, x, y, grid, sentence_embeddings, loss_fn):
+        y_pred = self.forward(x, grid, sentence_embeddings)[...,0,0]
+        return y_pred, loss_fn(y_pred, y)
+
+
 class SpectralConv3d(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2, modes3):
         super(SpectralConv3d, self).__init__()

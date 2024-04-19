@@ -4,8 +4,10 @@ import torch
 from torch.utils.data import Dataset
 from torch.nn import functional as F
 from typing import Tuple
-from common.augmentation import to_coords
+#from common.augmentation import to_coords
 import random
+from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 
 class PDEDataset(Dataset):
     """Load samples of an PDE Dataset, get items according to PDE"""
@@ -75,6 +77,16 @@ class PDEDataset(Dataset):
 
             f.close()
 
+        # Use LLM if CLIP
+        self.clip = clip
+        if(self.clip):
+            self.sentence_embedder = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
+            self.sentence_embeddings = []
+            for idx in range(self.x.shape[0]):
+                print(idx)
+            raise
+
+
     def __len__(self):
         return self.length*(len(self.augmentation)+1)
 
@@ -130,7 +142,9 @@ class PDEDataset2D(Dataset):
                  shift: str='fourier',
                  load_all: bool=False,
                  device: str='cuda:0',
-                 num_samples: int=-1) -> None:
+                 num_samples: int=-1,
+                 clip: bool=False,
+                 downsample: int=1) -> None:
         """Initialize the dataset object
         Args:
             path: path to dataset
@@ -148,19 +162,46 @@ class PDEDataset2D(Dataset):
         f = h5py.File(path, 'r')
         self.mode = mode
         self.pde = pde
+        self.downsample = downsample
         self.resolution = (100, 64, 64) if resolution is None else resolution
         self.data = f[self.mode]
-        self.num_samples = len(self.data["u"])+2 if(num_samples == -1) else num_samples
-        self.u = self.data["u"][:self.num_samples]
-        self.length = len(self.u)
-        self.nu = self.data["nu"][:self.num_samples]
-        self.ax = self.data["ax"][:self.num_samples]
-        self.ay = self.data["ay"][:self.num_samples]
-        self.cx = self.data["cx"][:self.num_samples]
-        self.cy = self.data["cy"][:self.num_samples]
+        if(mode == 'train'):
+            self.num_samples = len(self.data["u"])+2 if(num_samples == -1) else num_samples
+        else:
+            self.num_samples = 768 # Use entire validation set
 
-        self.x = torch.tensor(np.array(self.data["x"][:self.num_samples]))
-        self.t = torch.tensor(np.array(self.data["t"][:self.num_samples]))
+        idxs = torch.randperm(self.data["u"].shape[0])[:self.num_samples].cpu().numpy()
+
+        self.u = self.data["u"][:][idxs][...,::self.downsample, ::self.downsample]
+        self.length = len(self.u)
+        self.nu = torch.Tensor(self.data["nu"][:][idxs])
+        self.ax = torch.Tensor(self.data["ax"][:][idxs])
+        self.ay = torch.Tensor(self.data["ay"][:][idxs])
+        self.cx = torch.Tensor(self.data["cx"][:][idxs])
+        self.cy = torch.Tensor(self.data["cy"][:][idxs])
+
+        #print()
+        #print("NU: {}\t{}".format(self.nu.max(), self.nu.min()))
+        #print("AX: {}\t{}".format(self.ax.max(), self.ax.min()))
+        #print("AY: {}\t{}".format(self.ay.max(), self.ay.min()))
+        #print("CX: {}\t{}".format(self.cx.max(), self.cx.min()))
+        #print("CY: {}\t{}".format(self.cy.max(), self.cy.min()))
+        #print()
+        #raise
+
+        self.x = torch.tensor(np.array(self.data["x"][:]))[...,::self.downsample, ::self.downsample]
+        self.t = torch.tensor(np.array(self.data["t"][:]))
+
+        #self.u = self.data["u"][:self.num_samples]
+        #self.length = len(self.u)
+        #self.nu = self.data["nu"][:self.num_samples]
+        #self.ax = self.data["ax"][:self.num_samples]
+        #self.ay = self.data["ay"][:self.num_samples]
+        #self.cx = self.data["cx"][:self.num_samples]
+        #self.cy = self.data["cy"][:self.num_samples]
+
+        #self.x = torch.tensor(np.array(self.data["x"][:self.num_samples]))
+        #self.t = torch.tensor(np.array(self.data["t"][:self.num_samples]))
 
         self.tmin = self.t[0]
         self.tmax = self.t[-1]
@@ -176,23 +217,63 @@ class PDEDataset2D(Dataset):
         self.shift = shift
         self.augmentation_ratio = augmentation_ratio
 
-        if load_all:
-            self.u = torch.tensor(self.u[:]).to(device)
-            self.nu = torch.tensor(self.nu[:]).to(device)
-            self.ax = torch.tensor(self.ax[:]).to(device)
-            self.ay = torch.tensor(self.ay[:]).to(device)
-            self.cx = torch.tensor(self.cx[:]).to(device)
-            self.cy = torch.tensor(self.cy[:]).to(device)
+        f.close()
 
-            self.x = self.x.to(device)
-            self.t = self.t.to(device)
+        # Use LLM if CLIP
+        self.clip = clip
+        if(self.clip):
+            self.sentence_embedder = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
+            self.sentence_embeddings = []
+            print("Getting sentence embeddings...")
+            #ratios = []
+            #advs = []
+            for idx in tqdm(range(self.u.shape[0])):
+                # Case by case each equation
+                #print(idx, self.nu[idx], self.ax[idx], self.ay[idx], self.cx[idx], self.cy[idx])
 
-            f.close()
+                # Burgers
+                if(self.nu[idx] != 0 and self.cx[idx] != 0 and self.cy[idx] != 0):
+                    ratio = ((self.cx[idx] + self.cy[idx])**2)**(0.5)/self.nu[idx]
+                    #ratios.append(ratio)
+                    sentence = 'Burgers equation models a conservative system that can develop shock wave discontinuities.'
+                    sentence += ' Burgers equation is a first order quasilinear hyperbolic partial differential equation.'
+                    sentence += ' In this case, the advection term has a coefficient of {} in the x direction, {} in the y direction, and the diffusion term has a coefficient of {}.'.format(self.cx[idx], self.cy[idx], self.nu[idx])
+
+                    cls = 'strongly' if(ratio > 100) else 'weakly'
+                    sim = ' not ' if(ratio > 100) else ' '
+                    sentence += ' This system is {} advection dominanted and does{}behave similarly to heat equation.'.format(cls, sim)
+                # Advection
+                elif(self.ax[idx] != 0 and self.ay[idx] != 0):
+                    adv = ((self.ax[idx] + self.ay[idx])**2)**(0.5)
+                    #advs.append(adv)
+                    sentence = 'The Advection equation models bulk transport of a substance or quantity. It does not develop shocks.'
+                    sentence += ' The Advection equation is a linear hyperbolic partial differential equation.'
+                    sentence += ' In this case, the advection term has a coefficient of {} in the x direction, {} in the y direction.'.format(self.ax[idx], self.ay[idx])
+
+                    cls = 'strongly' if(adv > 2) else 'weakly'
+                    sentence += ' This system is {} advective.'.format(cls)
+                # Heat
+                elif(self.nu[idx] != 0 and self.cx[idx] == 0 and self.cy[idx] == 0):
+                    sentence = 'The Heat equation models how a quantity such as heat diffuses through a given region.'
+                    sentence += ' The Heat equation is a linear parabolic partial differential equation.'
+                    sentence += ' In this case, the diffusion term has a coefficient of {}.'.format(self.nu[idx])
+
+                    cls = 'strongly' if(self.nu[idx] > 0.01) else 'weakly'
+                    sentence += 'This system is {} diffusive.'.format(cls)
+
+                self.sentence_embeddings.append(self.sentence_embedder.encode(sentence))
+            print("Done.")
+            #advs = torch.Tensor(advs)
+            #ratios = torch.Tensor(ratios)
+            #print(advs.max(), advs.min())
+            #print(ratios.max(), ratios.min())
+        #raise
 
     def __len__(self):
         return self.length
+
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, torch.Tensor]:
         """
         Get data item
         Args:
@@ -220,7 +301,10 @@ class PDEDataset2D(Dataset):
                     u = torch.tensor(u)
                 u = self.augmentation(u, pde, self.shift)
 
-        return u, x, variables
+        if(self.clip):
+            return u, x.permute(1,2,0), variables, self.sentence_embeddings[idx]
+        else:
+            return u, x.permute(1,2,0), variables
     
     def get_PDE(self, variables):
         if variables['ax'] != 0 and variables['ay'] != 0:

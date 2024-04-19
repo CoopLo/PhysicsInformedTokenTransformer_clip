@@ -668,7 +668,7 @@ class TransformerMultiOperatorDataset(Dataset):
         #data_files = ['varied_heat_10000.h5', 'varied_burgers_2500.h5', 'varied_kdv_2500.h5']
 
         #data_files = ['varied_heat_2500.h5', 'varied_burgers_2500.h5', 'varied_kdv_2500.h5']
-        data_files = ['kdv_250.h5']
+        data_files = ['heat_250.h5', 'burgers_250.h5', 'kdv_250.h5']
 
         self.data = []
         self.grid = []
@@ -815,8 +815,9 @@ class TransformerMultiOperatorDataset(Dataset):
                 time_tokens = self._encode_tokens("&" + str(self.time[idx][self.sim_time]))
                 while(len(time_tokens) + len(self.tokens[idx]) < 490): # Padding
                     time_tokens.append(len(self.WORDS))
-                time_included_tokens.append(np.append(self.tokens[idx], time_tokens))
+                time_included_tokens.append(np.append(self.tokens[idx].cpu(), time_tokens))
             self.time_included_tokens = torch.Tensor(np.array(time_included_tokens))#.to(device=device)#.cuda()#.int()
+            self.all_tokens = torch.Tensor(np.array(time_included_tokens))#.to(device=device)#.cuda()#.int()
 
         elif(self.train_style in ['next_step', 'arbitrary_step'] and self.return_text):
             # Create array of all legal encodings, pdes, and data

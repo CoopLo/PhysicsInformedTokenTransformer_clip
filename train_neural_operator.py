@@ -22,6 +22,7 @@ from models.oformer import Encoder1D, PointWiseDecoder1D, OFormer1D
 from models.fno import FNO1d
 from models.deeponet import DeepONet1D
 from utils import TransformerOperatorDataset
+from anthony_data_handling import PDEDataset2D
 
 import yaml
 from tqdm import tqdm
@@ -185,6 +186,57 @@ def get_data(f, config):
     return train_loader, val_loader, test_loader
 
 
+def new_get_data(f, config, pretraining=False):
+    train_data = PDEDataset2D(
+            path="/home/cooperlorsung/2d_heat_adv_burgers_train_large.h5",
+            pde="Heat, Burgers, Advection",
+            mode="train",
+            resolution=[50,64,64],
+            augmentation=[],
+            augmentation_ratio=0.0,
+            shift='None',
+            load_all=False,
+            device='cuda:0',
+            num_samples=config['num_samples'],
+            clip=config['embedding'] == 'clip',
+    )
+    val_data = PDEDataset2D(
+            path="/home/cooperlorsung/2d_heat_adv_burgers_valid_large.h5",
+            pde="Heat, Burgers, Advection",
+            mode="valid",
+            resolution=[50,64,64],
+            augmentation=[],
+            augmentation_ratio=0.0,
+            shift='None',
+            load_all=False,
+            device='cuda:0',
+            num_samples=config['num_samples'],
+            clip=config['embedding'] == 'clip',
+    )
+    test_data = PDEDataset2D(
+            path="/home/cooperlorsung/2d_heat_adv_burgers_test_large.h5",
+            pde="Heat, Burgers, Advection",
+            mode="test",
+            resolution=[50,64,64],
+            augmentation=[],
+            augmentation_ratio=0.0,
+            shift='None',
+            load_all=False,
+            device='cuda:0',
+            num_samples=config['num_samples'],
+            clip=config['embedding'] == 'clip',
+    )
+    batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
+                                               num_workers=config['num_workers'], shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
+                                             num_workers=config['num_workers'], shuffle=True)
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size,
+                                             num_workers=config['num_workers'], shuffle=False)
+
+    return train_loader, val_loader, test_loader
+
+
 def evaluate(test_loader, model, loss_fn):
     test_l2_step = 0
     test_l2_full = 0
@@ -220,7 +272,7 @@ def run_training(model, config, prefix):
     
     print("Filename: {}, Seed: {}\n".format(config['flnm'], config['seed']))
 
-    train_loader, val_loader, test_loader = get_data(f, config)
+    train_loader, val_loader, test_loader = new_get_data(f, config)
     
     ################################################################
     # training and evaluation

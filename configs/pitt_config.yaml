@@ -2,7 +2,7 @@ args:
     if_training: True
     results_dir: './1D_results/'
 
-    train_style: 'next_step'
+    train_style: 'fixed_future'
 
     transformer: 'pitt'
     neural_operator: 'oformer' # fno, oformer, deeponet
@@ -22,10 +22,11 @@ args:
 
     #flnm: 'Heat'
     #data_name: 'varied_heat_10000.h5'
-    flnm: 'Burgers'
-    data_name: 'varied_burgers_2500.h5'
+    #flnm: 'Burgers'
+    #data_name: 'varied_burgers_2500.h5'
     #flnm: 'KdV'
-    #data_name: 'varied_kdv_2500.h5'
+    data_name: 'varied_kdv_2500.h5'
+    flnm: 'all' # TODO: Add this to standard training script for comparison
 
     fno: False
     return_text: True
@@ -45,7 +46,7 @@ args:
     #
     num_x: 100
     num_t: 100
-    sim_time: 1000
+    sim_time: 49
     num_samples: 10
 
     # Transformer

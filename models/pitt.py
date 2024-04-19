@@ -1252,22 +1252,23 @@ class CLIPPhysicsInformedTokenTransformer2D(nn.Module):
 
 class CLIPTransformer2D(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_layers, num_heads, output_dim1, output_dim2, neural_operator,
-                 temporal_neural_operator, dropout=0.1):
+                 temporal_neural_operator, latent_dim=50, dropout=0.1):
         super().__init__()
 
-        self.temp = nn.Linear(100, 100, bias=False)
-        self.temp.weight.data.copy_(torch.eye(100))
         self.output_dim1 = output_dim1
         self.output_dim2 = output_dim2
         self.hidden_dim = hidden_dim
+        self.latent_dim = latent_dim
 
         # For CLIP
-        self.sentence_proj = nn.Linear(384, 50)
-        self.diff_x_proj = nn.Linear(self.output_dim1*self.output_dim2, 50)
+        self.sentence_proj = nn.Linear(384, self.latent_dim)
+        self.diff_x_proj = nn.Linear(self.output_dim1*self.output_dim2, self.latent_dim)
 
         # Get input processing
-        self.kh1_embedding = nn.Linear(self.output_dim1*self.output_dim2, hidden_dim, bias=False)
-        self.kh2_embedding = nn.Linear(self.output_dim1*self.output_dim2, hidden_dim, bias=False)
+        #self.kh1_embedding = nn.Linear(self.output_dim1*self.output_dim2, hidden_dim, bias=False)
+        #self.kh2_embedding = nn.Linear(self.output_dim1*self.output_dim2, hidden_dim, bias=False)
+        self.kh1_embedding = nn.Linear(self.latent_dim, hidden_dim, bias=False)
+        self.kh2_embedding = nn.Linear(self.latent_dim, hidden_dim, bias=False)
 
         # Query and value processing
         self.vh_embedding_layer = nn.Linear(output_dim1*output_dim2, hidden_dim, bias=False)
@@ -1318,8 +1319,13 @@ class CLIPTransformer2D(nn.Module):
 
         if(clip):
             # Temporal Physics Model Forward
+            #print(values.shape)
+            #raise
 
-            diff_x = self.temporal_neural_operator(values, queries)
+            #diff_x = self.temporal_neural_operator(values, queries)
+            temporal_values = values[...,1:] - values[...,:-1]
+            diff_x = self.temporal_neural_operator(temporal_values, queries)
+
             #if(batch is not None):
             #    sentence_emb = self.sentence_proj(sentence) if(batch%20 < 10) else self.sentence_proj(sentence).detach()
             #    token_emb = self.token_proj(diff_x.flatten(1,2)) if(batch%20 >= 10) else self.token_proj(diff_x.flatten(1,2)).detach()
@@ -1334,7 +1340,18 @@ class CLIPTransformer2D(nn.Module):
         else:
             with torch.no_grad():
                 # Temporal Physics Model Forward
-                diff_x = self.temporal_neural_operator(values, queries)
+                #diff_x = self.temporal_neural_operator(values, queries)
+                temporal_values = values[...,1:] - values[...,:-1]
+                diff_x = self.temporal_neural_operator(temporal_values, queries)
+                #print()
+                #print()
+                #print(diff_x.shape)
+                #token_emb = self.diff_x_proj(diff_x.flatten(1,2))
+                diff_x = self.diff_x_proj(diff_x.flatten(1,2))
+                #print(token_emb.shape)
+                #print()
+                #print()
+                #raise
 
         # Get difference between physics model output and input
         x = self.neural_operator(values, queries)
@@ -1350,8 +1367,10 @@ class CLIPTransformer2D(nn.Module):
         vh_old = vh.clone()
 
         # Embed temporal representation
-        kh1 = self.kh1_embedding(diff_x.flatten(1,2)).unsqueeze(1)
-        kh2 = self.kh2_embedding(diff_x.flatten(1,2)).unsqueeze(1)
+        #kh1 = self.kh1_embedding(diff_x.flatten(1,2)).unsqueeze(1)
+        #kh2 = self.kh2_embedding(diff_x.flatten(1,2)).unsqueeze(1)
+        kh1 = self.kh1_embedding(diff_x).unsqueeze(1)
+        kh2 = self.kh2_embedding(diff_x).unsqueeze(1)
 
         #print("OLD VH SHAPE: {}".format(vh_old.shape))
         for l in range(self.num_layers):

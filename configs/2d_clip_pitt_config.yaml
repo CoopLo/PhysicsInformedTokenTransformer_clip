@@ -1,10 +1,11 @@
 args:
     if_training: True
     neural_operator: False
-    #results_dir: './2D_ns_next_step/'
-    results_dir: './new_CLIP_FF_IC_20/'
-    #results_dir: './2D_FF_IC_30/'
-    #results_dir: './2D_ELECTRIC/'
+    #results_dir: './new_CLIP_FF_IC_20/'
+    #results_dir: './large_embed/'
+    #
+    #results_dir: './new_large_diff_embed/'
+    results_dir: './test/'
 
     model: 'pitt' 
     neural_operator: 'deeponet' # fno, oformer, deeponet
@@ -16,8 +17,8 @@ args:
     #split_style: 'equation'
     split_style: 'initial_condition'
 
-    train_style: 'next_step'
-    #train_style: 'fixed_future'
+    #train_style: 'next_step'
+    train_style: 'fixed_future'
     
     attention_type: 'galerkin'
 
@@ -27,9 +28,9 @@ args:
     forcing: False
     rollout_length: 1
     num_workers: 0
-    batch_size: 16
-    pretraining_batch_size: 16
-    initial_step: 1
+    batch_size: 32
+    pretraining_batch_size: 256
+    initial_step: 10
     t_train: 200
     model_update: 1
 
@@ -45,21 +46,20 @@ args:
     reduced_batch: 1
 
     epochs: 200
-    pretraining_epochs: 200
-    #pretraining_epochs: 0
+    pretraining_epochs: 500
     num_seeds: 5
-    dropout: 0.6
+    dropout: 0.2
 
     # Optimizer
     learning_rate: 1.e-3
-    weight_decay: 1.e-3
+    weight_decay: 1.e-4
     scheduler_step: 2
     scheduler_gamma: 0.1
     training_type: single
 
     # Pretraining optimizer
-    pretraining_learning_rate: 1.e-3
-    pretraining_weight_decay: 1.e-8
+    pretraining_learning_rate: 1.e-4
+    pretraining_weight_decay: 1.e-6
     pretraining_scheduler_step: 2
     pretraining_scheduler_gamma: 0.1
     pretraining_training_type: single
@@ -78,16 +78,17 @@ args:
     # Next-step
     #sim_time: 1000
 
-    #num_samples: 10
-    num_samples: 100
+    num_samples: 10
+    #num_samples: 100
     #num_samples: 370
-    #num_samples: 5000
+    #num_samples: 4000
     
     # For mixed next step training
     #samples_per_equation: 1
     samples_per_equation: 1
 
     # Transformer
+    latent_dim: 64
     hidden: 64
     layers: 4
     heads: 4
@@ -99,14 +100,15 @@ args:
     num_channels: 1
 
     # DeepONet
-    branch_net: [1, 128, 128]
-    trunk_net: [2, 128, 128]
+    branch_net: [10, 256, 256]
+    temporal_branch_net: [9, 256, 256]
+    trunk_net: [2, 256, 256]
     activation: 'silu'
     kernel_initializer: 'Glorot normal'
 
     # OFormer
     # Encoder
-    input_channels: 3    # Number of frames?
+    input_channels: 12    # Number of frames?
     #input_channels: 43    # Number of frames?
     heads: 4
     in_emb_dim: 64       # num_x

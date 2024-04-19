@@ -313,6 +313,7 @@ def run_pretraining(config, prefix):
     loss_val_min = np.infty
     lrs = []
     shift = 0
+    print("\nPRETRAINING")
     for epoch in tqdm(range(config['pretraining_epochs'])):
         # Iterate over the training dataset.
         train_loss = 0
@@ -446,6 +447,7 @@ def run_pretraining(config, prefix):
     print("TEST VALUE BEST LAST EPOCH: {0:5f}".format(test_value))
     np.save("{}{}_{}_{}/test_vals_{}.npy".format(config['results_dir'], config['transformer'],
                                                  config['neural_operator'],  prefix, seed), test_vals)
+    return transformer
 
 
 def run_training(transformer, config, prefix):

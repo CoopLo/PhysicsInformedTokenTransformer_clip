@@ -33,7 +33,7 @@ args:
     num_t: 100
     num_x: 100
     sim_time: 999
-    num_samples: 1000
+    num_samples: 4000
 
     # FNO
     num_channels: 1

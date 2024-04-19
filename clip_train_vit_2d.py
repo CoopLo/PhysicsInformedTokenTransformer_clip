@@ -105,18 +105,22 @@ def evaluate(test_loader, transformer, loss_fn, config=None):
             # Put data on correct device
             x0 = x0.to(device).float()
             y = y.to(device).float()
-            #tokens = tokens.to(device).float()
-            #t = t.to(device).float()
             grid = grid.to(device).float()
 
             # Rearrange data
-            #if(config is not None and not('electric' in config['data_name'])):
-            #    x0 = torch.swapaxes(x0, 1, 3)
-            #    x0 = torch.swapaxes(x0, 1, 2)
-
-            #y_pred = transformer(grid, tokens, x0, t)
-            y_pred = transformer(grid, None, x0, None)
-            y = y[...,0].to(device=device)
+            if(config['coeff']):
+                nu = coeffs['nu'].unsqueeze(-1)
+                ax = coeffs['ax'].unsqueeze(-1)
+                ay = coeffs['ay'].unsqueeze(-1)
+                cx = coeffs['cx'].unsqueeze(-1)
+                cy = coeffs['cy'].unsqueeze(-1)
+                coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+            else:
+                inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
+            #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
+            y_pred = transformer(inp, sentence_embeddings)
+            y = y.to(device=device)
     
             # Compute the loss.
             test_loss += loss_fn(y_pred, y).item()
@@ -127,158 +131,6 @@ def evaluate(test_loader, transformer, loss_fn, config=None):
 def generate_square_subsequent_mask(sz: int):
     """Generates an upper-triangular matrix of -inf, with zeros on diag."""
     return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
-
-
-def get_data(f, config, pretraining=False):
-    if('electric' in config['data_name']):
-        f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
-        print("\nTRAINING DATA")
-        train_data = ElectricTransformerOperatorDataset2D(f,
-                                split="train",
-                                initial_step=config['initial_step'],
-                                reduced_resolution=config['reduced_resolution'],
-                                reduced_resolution_t=config['reduced_resolution_t'],
-                                reduced_batch=config['reduced_batch'],
-                                saved_folder=config['base_path'],
-                                return_text=config['return_text'],
-                                num_t=config['num_t'],
-                                num_x=config['num_x'],
-                                sim_time=config['sim_time'],
-                                num_samples=config['num_samples'],
-                                train_style=config['train_style'],
-                                split_style=config['split_style'],
-                                seed=config['seed']
-        )
-        print("\nVALIDATION DATA")
-        f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
-        val_data = ElectricTransformerOperatorDataset2D(f,
-                                split="val",
-                                initial_step=config['initial_step'],
-                                reduced_resolution=config['reduced_resolution'],
-                                reduced_resolution_t=config['reduced_resolution_t'],
-                                reduced_batch=config['reduced_batch'],
-                                saved_folder=config['base_path'],
-                                return_text=config['return_text'],
-                                num_t=config['num_t'],
-                                num_x=config['num_x'],
-                                sim_time=config['sim_time'],
-                                num_samples=config['num_samples'],
-                                train_style=config['train_style'],
-                                split_style=config['split_style'],
-                                seed=config['seed']
-        )
-        print("\nTEST DATA")
-        f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
-        test_data = ElectricTransformerOperatorDataset2D(f,
-                                split="test",
-                                initial_step=config['initial_step'],
-                                reduced_resolution=config['reduced_resolution'],
-                                reduced_resolution_t=config['reduced_resolution_t'],
-                                reduced_batch=config['reduced_batch'],
-                                saved_folder=config['base_path'],
-                                return_text=config['return_text'],
-                                num_t=config['num_t'],
-                                num_x=config['num_x'],
-                                sim_time=config['sim_time'],
-                                num_samples=config['num_samples'],
-                                train_style=config['train_style'],
-                                split_style=config['split_style'],
-                                seed=config['seed']
-        )
-    else:
-        f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
-        print("\nTRAINING DATA")
-        train_data = TransformerOperatorDataset2D(f,
-                                split="train",
-                                initial_step=config['initial_step'],
-                                reduced_resolution=config['reduced_resolution'],
-                                reduced_resolution_t=config['reduced_resolution_t'],
-                                reduced_batch=config['reduced_batch'],
-                                saved_folder=config['base_path'],
-                                return_text=config['return_text'],
-                                num_t=config['num_t'],
-                                num_x=config['num_x'],
-                                sim_time=config['sim_time'],
-                                num_samples=config['num_samples'],
-                                train_style=config['train_style'],
-                                split_style=config['split_style'],
-                                samples_per_equation=config['samples_per_equation'],
-                                seed=config['seed'],
-                                clip=config['embedding'] == 'clip',
-        )
-        print("\nVALIDATION DATA")
-        f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
-        val_data = TransformerOperatorDataset2D(f,
-                                split="val",
-                                initial_step=config['initial_step'],
-                                reduced_resolution=config['reduced_resolution'],
-                                reduced_resolution_t=config['reduced_resolution_t'],
-                                reduced_batch=config['reduced_batch'],
-                                saved_folder=config['base_path'],
-                                return_text=config['return_text'],
-                                num_t=config['num_t'],
-                                num_x=config['num_x'],
-                                sim_time=config['sim_time'],
-                                num_samples=config['num_samples'],
-                                train_style=config['train_style'],
-                                split_style=config['split_style'],
-                                samples_per_equation=config['samples_per_equation'],
-                                seed=config['seed'],
-                                clip=config['embedding'] == 'clip',
-        )
-        print("\nTEST DATA")
-        f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
-        test_data = TransformerOperatorDataset2D(f,
-                                split="test",
-                                initial_step=config['initial_step'],
-                                reduced_resolution=config['reduced_resolution'],
-                                reduced_resolution_t=config['reduced_resolution_t'],
-                                reduced_batch=config['reduced_batch'],
-                                saved_folder=config['base_path'],
-                                return_text=config['return_text'],
-                                num_t=config['num_t'],
-                                num_x=config['num_x'],
-                                sim_time=config['sim_time'],
-                                num_samples=config['num_samples'],
-                                train_style=config['train_style'],
-                                split_style=config['split_style'],
-                                samples_per_equation=config['samples_per_equation'],
-                                seed=config['seed'],
-                                clip=config['embedding'] == 'clip',
-        )
-
-    # Check against data leaks
-    if(config['split_style'] == 'equation'):
-        assert not (bool(set(train_data.data_list) & \
-                         set(val_data.data_list)) | \
-                    bool(set(train_data.data_list) & \
-                         set(test_data.data_list)) & \
-                    bool(set(val_data.data_list) & \
-                         set(test_data.data_list)))
-    elif(config['split_style'] == 'initial_condition'):
-        assert not (bool(set(train_data.idxs) & \
-                         set(val_data.idxs)) | \
-                    bool(set(train_data.idxs) & \
-                         set(test_data.idxs)) & \
-                    bool(set(val_data.idxs) & \
-                         set(test_data.idxs)))
-    else:
-        raise ValueError("Invalid splitting style. Select initial_condition or equation")
-
-    batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
-                                               num_workers=config['num_workers'], shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
-                                             num_workers=config['num_workers'], shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size,
-                                             num_workers=config['num_workers'], shuffle=False)
-    #train_loader = torch.utils.data.DataLoader(train_data, batch_size=config['batch_size'], generator=torch.Generator(device='cuda'),
-    #                                           num_workers=config['num_workers'], shuffle=True)
-    #val_loader = torch.utils.data.DataLoader(val_data, batch_size=config['batch_size'], generator=torch.Generator(device='cuda'),
-    #                                         num_workers=config['num_workers'], shuffle=True)
-    #test_loader = torch.utils.data.DataLoader(test_data, batch_size=config['batch_size'],
-    #                                         num_workers=config['num_workers'], shuffle=False)
-    return train_loader, val_loader, test_loader
 
 
 def new_get_data(f, config, pretraining=False):
@@ -292,8 +144,9 @@ def new_get_data(f, config, pretraining=False):
             shift='None',
             load_all=False,
             device='cuda:0',
-            num_samples=config['num_samples'],
-            clip=config['embedding'] == 'clip',
+            num_samples=config['pretraining_num_samples'] if(pretraining) else config['num_samples'],
+            clip=config['clip'],
+            downsample=config['downsample']
     )
     val_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_valid_large.h5",
@@ -303,10 +156,11 @@ def new_get_data(f, config, pretraining=False):
             augmentation=[],
             augmentation_ratio=0.0,
             shift='None',
-            load_all=False,
+            load_all=True,
             device='cuda:0',
             num_samples=config['num_samples'],
-            clip=config['embedding'] == 'clip',
+            clip=config['clip'],
+            downsample=config['downsample']
     )
     test_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_test_large.h5",
@@ -316,10 +170,11 @@ def new_get_data(f, config, pretraining=False):
             augmentation=[],
             augmentation_ratio=0.0,
             shift='None',
-            load_all=False,
+            load_all=True,
             device='cuda:0',
             num_samples=config['num_samples'],
-            clip=config['embedding'] == 'clip',
+            clip=config['clip'],
+            downsample=config['downsample']
     )
     batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
@@ -386,10 +241,10 @@ def get_transformer(model_name, config):
                                         neural_operator=neural_operator, temporal_neural_operator=temporal_neural_operator,
                                         latent_dim=config['latent_dim']).to(device=device)
     elif(model_name == 'vit'):
-        model = VisionTransformer(
+        transformer = CLIPVisionTransformer(
                    img_size=config['img_size'],
                    patch_size=config['patch_size'],
-                   in_chans=config['initial_step']+2,
+                   in_chans=config['initial_step']+7 if(config['coeff']) else config['initial_step']+2,
                    out_chans=1,
                    embed_dim=config['embed_dim'],
                    depth=config['depth'],
@@ -408,14 +263,14 @@ def get_transformer(model_name, config):
 
 def run_pretraining(config, prefix):
     #prefix = config['data_name'].split("_")[0]
-    path = "{}{}_{}_{}".format(config['results_dir'], config['model'], config['neural_operator'], prefix)
+    path = "{}{}_{}/{}_vit".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
     f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
-    model_name = 'pretraining_{}'.format(config['model']) + "_{}.pt".format(seed)
+    model_name = 'pretraining_vit' + "_{}.pt".format(seed)
     model_path = path + "/" + model_name
 
     # Create the transformer model.
-    transformer = get_transformer(config['model'], config)
-    if(config['pretraining_epochs'] == 0):
+    transformer = get_transformer('vit', config)
+    if(config['pretraining_num_samples'] == 0):
         print("\nNO PRETRAINING\n")
         return transformer
 
@@ -481,7 +336,18 @@ def run_pretraining(config, prefix):
             sentence_embeddings = sentence_embeddings.to(device).float()
 
             # Forward pass
-            y_pred = transformer(grid, None, x0, None, sentence_embeddings, True, bn)
+            if(config['coeff']):
+                nu = coeffs['nu'].unsqueeze(-1)
+                ax = coeffs['ax'].unsqueeze(-1)
+                ay = coeffs['ay'].unsqueeze(-1)
+                cx = coeffs['cx'].unsqueeze(-1)
+                cy = coeffs['cy'].unsqueeze(-1)
+                coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+            else:
+                inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
+            #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
+            y_pred = transformer(inp, sentence_embeddings, True)
 
             labels = torch.arange(y_pred.shape[1]).to(device).repeat(y_pred.shape[0], 1)
             loss = clip_loss_fn(y_pred, labels)
@@ -513,7 +379,18 @@ def run_pretraining(config, prefix):
                 #t = t.to(device).float()
                 grid = grid.to(device).float()
 
-                y_pred = transformer(grid, None, x0, None, sentence_embeddings, True)
+                if(config['coeff']):
+                    nu = coeffs['nu'].unsqueeze(-1)
+                    ax = coeffs['ax'].unsqueeze(-1)
+                    ay = coeffs['ay'].unsqueeze(-1)
+                    cx = coeffs['cx'].unsqueeze(-1)
+                    cy = coeffs['cy'].unsqueeze(-1)
+                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                    inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+                else:
+                    inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
+                #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
+                y_pred = transformer(inp, sentence_embeddings, True)
 
                 labels = torch.arange(y_pred.shape[1]).to(device).repeat(y_pred.shape[0], 1)
                 loss = clip_loss_fn(y_pred, labels)
@@ -555,7 +432,7 @@ def run_pretraining(config, prefix):
     test_value = evaluate(test_loader, transformer, loss_fn, config=config)
     test_vals.append(test_value)
     print("TEST VALUE BEST LAST EPOCH: {0:5f}".format(test_value))
-    np.save("{}{}_{}_{}/pretraining_test_vals_{}.npy".format(config['results_dir'], config['model'], config['neural_operator'], prefix, seed), test_vals)
+    np.save("{}{}_{}/{}_vit/pretraining_test_vals_{}.npy".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix, seed), test_vals)
 
     # Save the embeddings
     if(seed == 0):
@@ -566,8 +443,18 @@ def run_pretraining(config, prefix):
                 x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
 
                 #emb = transformer.diff_x_proj(transformer.temporal_neural_operator(x0, grid).flatten(1,2))
-                temporal_x = x0[...,1:] - x0[...,:-1]
-                emb = transformer.diff_x_proj(transformer.temporal_neural_operator(temporal_x, grid).flatten(1,2))
+                #temporal_x = x0[...,1:] - x0[...,:-1]
+                if(config['coeff']):
+                    nu = coeffs['nu'].unsqueeze(-1)
+                    ax = coeffs['ax'].unsqueeze(-1)
+                    ay = coeffs['ay'].unsqueeze(-1)
+                    cx = coeffs['cx'].unsqueeze(-1)
+                    cy = coeffs['cy'].unsqueeze(-1)
+                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                    inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+                else:
+                    inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
+                emb = transformer(inp, sentence_embeddings, False, True)
 
                 embs.append(emb)
                 all_coeffs.append(torch.vstack(list(coeffs.values())).transpose(0,1))
@@ -584,13 +471,12 @@ def run_pretraining(config, prefix):
 
 def run_training(transformer, config, prefix):
     #prefix = config['data_name'].split("_")[0]
-    path = "{}{}_{}_{}".format(config['results_dir'], config['model'], config['neural_operator'], prefix)
+    path = "{}{}_{}/{}_vit".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
     f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
-    model_name = '{}'.format(config['model']) + "_{}.pt".format(seed)
+    model_name = 'vit' + "_{}.pt".format(seed)
     model_path = path + "/" + model_name
 
     # Create the transformer model.
-    #transformer = get_transformer(config['model'], config)
 
     total_params = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
     print(f'Total parameters = {total_params}')
@@ -610,15 +496,15 @@ def run_training(transformer, config, prefix):
     dimensions = len(_data.shape)
     print('Spatial Dimension', dimensions - 3)
 
-    
+
     # Use Adam as the optimizer.
     optimizer = torch.optim.Adam(transformer.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=config['learning_rate'],# div_factor=1e6,
-                                                    steps_per_epoch=len(train_loader), epochs=config['epochs'])
-    
+            steps_per_epoch=len(train_loader), epochs=config['epochs'])
+
     # Use mean squared error as the loss function.
     loss_fn = nn.L1Loss(reduction='mean')
-    
+
     # Train the transformer for the specified number of epochs.
     train_losses = []
     val_losses = []
@@ -654,9 +540,21 @@ def run_training(transformer, config, prefix):
 
             # Forward pass
             #y_pred = transformer(grid, tokens, x0, t)
-            y_pred = transformer(grid, None, x0, None, clip=False)
+            #y_pred = transformer(grid, None, x0, None, clip=False)
+            if(config['coeff']):
+                nu = coeffs['nu'].unsqueeze(-1)
+                ax = coeffs['ax'].unsqueeze(-1)
+                ay = coeffs['ay'].unsqueeze(-1)
+                cx = coeffs['cx'].unsqueeze(-1)
+                cy = coeffs['cy'].unsqueeze(-1)
+                coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+            else:
+                inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
+            #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
+            y_pred = transformer(inp, sentence_embeddings)
 
-            y = y[...,0].to(device=device)#.cuda()
+            y = y.to(device=device)#.cuda()
 
             # Compute the loss.
             loss = loss_fn(y_pred, y)
@@ -701,13 +599,24 @@ def run_training(transformer, config, prefix):
                 #    x0 = torch.swapaxes(x0, 1, 2)
 
                 #y_pred = transformer(grid, tokens, x0, t)
-                y_pred = transformer(grid, None, x0, None, clip=False)
-                y = y[...,0].to(device=device)#.cuda()
+                #y_pred = transformer(grid, None, x0, None, clip=False)
+                if(config['coeff']):
+                    nu = coeffs['nu'].unsqueeze(-1)
+                    ax = coeffs['ax'].unsqueeze(-1)
+                    ay = coeffs['ay'].unsqueeze(-1)
+                    cx = coeffs['cx'].unsqueeze(-1)
+                    cy = coeffs['cy'].unsqueeze(-1)
+                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                    inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+                else:
+                    inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
+                y_pred = transformer(inp, sentence_embeddings)
+                y = y.to(device=device)#.cuda()
                 if(bn == 0):
                     y_val_true = y.clone()
                     y_val_pred = y_pred.clone()
                 all_val_preds.append(y_pred.detach())
-    
+
                 # Compute the loss.
                 val_loss += loss_fn(y_pred, y).item()
 
@@ -720,7 +629,7 @@ def run_training(transformer, config, prefix):
                     'loss': loss_val_min
                     }, model_path)
 
-        val_loss /= (bn + 1)
+                val_loss /= (bn + 1)
         val_losses.append(val_loss)
 
         # Print the loss at the end of each epoch.
@@ -744,7 +653,7 @@ def run_training(transformer, config, prefix):
     test_value = evaluate(test_loader, transformer, loss_fn, config=config)
     test_vals.append(test_value)
     print("TEST VALUE BEST LAST EPOCH: {0:5f}".format(test_value))
-    np.save("{}{}_{}_{}/test_vals_{}.npy".format(config['results_dir'], config['model'], config['neural_operator'], prefix, seed), test_vals)
+    np.save("{}{}_{}/{}_vit/test_vals_{}.npy".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix, seed), test_vals)
 
 
 if __name__ == '__main__':
@@ -753,27 +662,31 @@ if __name__ == '__main__':
 
     # Load config
     #raise
-    with open("./configs/2d_clip_pitt_config.yaml", 'r') as stream:
+    with open("./configs/2d_vit_config.yaml", 'r') as stream:
         config = yaml.safe_load(stream)
 
     # Get arguments and get rid of unnecessary ones
     train_args = config['args']
     prefix = train_args['data_name'].split("_")[0] + "_" + train_args['train_style'] + "_" + train_args['embedding']
+    prefix += "_coeff" if(train_args['coeff']) else ""
     if('electric' in train_args['data_name']):
         prefix = "electric_" + prefix
     train_args['prefix'] = prefix
-    os.makedirs("{}{}_{}_{}".format(train_args['results_dir'], train_args['model'], train_args['neural_operator'], prefix),
+    os.makedirs("{}{}_{}/{}_vit".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'], prefix),
                 exist_ok=True)
-    shutil.copy("./configs/2d_clip_pitt_config.yaml",
-                "{}{}_{}_{}/2d_clip_pitt_config.yaml".format(train_args['results_dir'],
-                train_args['model'], train_args['neural_operator'], prefix))
-    shutil.copy("./plot_progress.py", "{}{}_{}_{}/plot_progress.py".format(train_args['results_dir'],
-                train_args['model'], train_args['neural_operator'], prefix))
-    shutil.copy("./pretrain_plot_progress.py", "{}{}_{}_{}/pretrain_plot_progress.py".format(train_args['results_dir'],
-                train_args['model'], train_args['neural_operator'], prefix))
+    shutil.copy("./configs/2d_vit_config.yaml",
+                "{}{}_{}/{}_vit/2d_vit_config.yaml".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'],
+                prefix))
+    shutil.copy("./plot_progress.py", "{}{}_{}/{}_vit/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'], 
+                prefix))
+    shutil.copy("./pretrain_plot_progress.py", "{}{}_{}/{}_vit/pretrain_plot_progress.py".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'],
+                prefix))
 
 
     for seed in range(train_args.pop('num_seeds')):
+    #for seed in [0,1]:
+    #for seed in [2,3]:
+    #for seed in [4]:
         print("\nSEED: {}\n".format(seed))
         torch.manual_seed(seed)
         np.random.seed(seed)

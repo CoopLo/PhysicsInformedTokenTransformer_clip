@@ -2,9 +2,8 @@ args:
     if_training: True
     neural_operator: False
     #results_dir: './2D_ns_next_step/'
-    results_dir: './new_CLIP_FF_IC_20/'
-    #results_dir: './2D_FF_IC_30/'
-    #results_dir: './2D_ELECTRIC/'
+    #results_dir: './new_CLIP_FF_IC_20/'
+    results_dir: './new_large_diff_embed/'
 
     model: 'pitt' 
     neural_operator: 'deeponet' # fno, oformer, deeponet
@@ -16,8 +15,8 @@ args:
     #split_style: 'equation'
     split_style: 'initial_condition'
 
-    train_style: 'next_step'
-    #train_style: 'fixed_future'
+    #train_style: 'next_step'
+    train_style: 'fixed_future'
     
     attention_type: 'galerkin'
 
@@ -28,7 +27,7 @@ args:
     rollout_length: 1
     num_workers: 0
     batch_size: 16
-    initial_step: 1
+    initial_step: 10
     #initial_step: 41
     t_train: 200
     model_update: 1
@@ -70,13 +69,13 @@ args:
     #sim_time: 1000
 
     #num_samples: 10
-    num_samples: 100
+    #num_samples: 100
     #num_samples: 370
-    #num_samples: 5000
+    num_samples: 1000
     
     # For mixed next step training
     #samples_per_equation: 1
-    samples_per_equation: 5
+    samples_per_equation: 1
 
     # Transformer
     hidden: 64
@@ -90,14 +89,14 @@ args:
     num_channels: 1
 
     # DeepONet
-    branch_net: [1, 128, 128]
+    branch_net: [10, 128, 128]
     trunk_net: [2, 128, 128]
     activation: 'silu'
     kernel_initializer: 'Glorot normal'
 
     # OFormer
     # Encoder
-    input_channels: 3    # Number of frames?
+    input_channels: 12    # Number of frames?
     #input_channels: 43    # Number of frames?
     heads: 4
     in_emb_dim: 64       # num_x

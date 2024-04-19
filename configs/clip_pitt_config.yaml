@@ -2,7 +2,7 @@ args:
     if_training: True
     results_dir: './1D_results/'
 
-    train_style: 'next_step'
+    train_style: 'fixed_future'
 
     transformer: 'pitt'
     neural_operator: 'deeponet' # fno, oformer, deeponet
@@ -50,7 +50,7 @@ args:
     #
     num_x: 100
     num_t: 100
-    sim_time: 1000
+    sim_time: 99
     num_samples: 10
 
     # Transformer
@@ -60,7 +60,7 @@ args:
     dropout: 0.05
 
     # Tracking
-    log_freq: 1
+    log_freq: 10
     progress_plot_freq: 10
 
     ##

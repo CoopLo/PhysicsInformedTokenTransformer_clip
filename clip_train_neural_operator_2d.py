@@ -6,6 +6,7 @@ import pickle
 import shutil
 import torch.nn as nn
 import torch.nn.functional as F
+import time
 
 import operator
 from functools import reduce
@@ -18,7 +19,7 @@ from timeit import default_timer
 
 sys.path.append('.')
 from models.oformer import SpatialTemporalEncoder2D, PointWiseDecoder2D, OFormer2D, STDecoder2D
-from models.fno import FNO2d
+from models.fno import CLIPFNO2d, FNO2d
 from models.deeponet import DeepONet2D
 from models.vit import VisionTransformer
 
@@ -107,9 +108,15 @@ def train_plots(train_loader, split, seed=None):
 
 def get_model(model_name, config):
     if(model_name == "fno"):
-        model = FNO2d(config['num_channels'], config['modes1'], config['modes2'], config['width'],
-                      config['initial_step']+5 if(config['coeff']) else config['initial_step'],
-                      config['dropout'])
+        model = CLIPFNO2d(
+                    config['num_channels'],
+                    config['modes1'],
+                    config['modes2'],
+                    config['width'],
+                    config['initial_step']+5 if(config['coeff']) else config['initial_step'],
+                    config['dropout'],
+                    embed_dim=config['embed_dim'],
+        )
     elif(model_name == "oformer"):
         encoder = SpatialTemporalEncoder2D(input_channels=config['input_channels'], in_emb_dim=config['in_emb_dim'],
                             out_seq_emb_dim=config['out_seq_emb_dim'], depth=config['depth'], heads=config['heads'])
@@ -296,7 +303,7 @@ def new_get_data(f, config, pretraining=False):
             shift='None',
             load_all=False,
             device='cuda:0',
-            num_samples=config['num_samples'],
+            num_samples=config['pretraining_num_samples'] if(pretraining) else config['num_samples'],
             clip=config['embedding'] == 'clip',
             downsample=config['downsample'],
     )
@@ -345,7 +352,7 @@ def evaluate(test_loader, model, loss_fn, navier_stokes=True, config=None):
     with torch.no_grad():
         model.eval()
         #for bn, (xx, yy, grid, tokens, t) in enumerate(test_loader):
-        for bn, (xx, grid, coeffs) in enumerate(test_loader):
+        for bn, (xx, grid, coeffs, sentence_embeddings) in enumerate(test_loader):
             if(config['train_style'] == 'next_step'):
                 random_step = random.randint(config['initial_step'], config['sim_time'])
                 yy = xx[:, random_step].unsqueeze(-1).to(device).float()
@@ -358,24 +365,12 @@ def evaluate(test_loader, model, loss_fn, navier_stokes=True, config=None):
             grid = grid.to(device).float()
             
             if(isinstance(model, (FNO2d, OFormer2D))):
-                #if(navier_stokes):
-                #    x = torch.swapaxes(xx, 1, 3)
-                #    x = torch.swapaxes(x, 1, 2)
-                #else:
-                #    x = xx
-                #im, loss = model.get_loss(x, yy[...,0], grid, loss_fn)
-                if(config['coeff']):
-                    nu = coeffs['nu'].unsqueeze(-1)
-                    ax = coeffs['ax'].unsqueeze(-1)
-                    ay = coeffs['ay'].unsqueeze(-1)
-                    cx = coeffs['cx'].unsqueeze(-1)
-                    cy = coeffs['cy'].unsqueeze(-1)
-                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1],     xx.shape[2], 5)
-                    inp = torch.cat((xx, coeff), dim=-1)
+                if(navier_stokes):
+                    x = torch.swapaxes(xx, 1, 3)
+                    x = torch.swapaxes(x, 1, 2)
                 else:
-                    inp = xx
-                im, loss = model.get_loss(inp, yy[...,0], grid, loss_fn)
-
+                    x = xx
+                im, loss = model.get_loss(x, yy[...,0], grid, loss_fn)
             elif(isinstance(model, DeepONet2D)):
                 #if(navier_stokes):
                 #    x = torch.swapaxes(xx, 1, 3)
@@ -384,6 +379,18 @@ def evaluate(test_loader, model, loss_fn, navier_stokes=True, config=None):
                 #    x = xx
                 im = model(xx, grid)
                 loss = loss_fn(yy[...,0], im)
+            elif(isinstance(model, CLIPFNO2d)):
+                if(config['coeff']):
+                    nu = coeffs['nu'].unsqueeze(-1)
+                    ax = coeffs['ax'].unsqueeze(-1)
+                    ay = coeffs['ay'].unsqueeze(-1)
+                    cx = coeffs['cx'].unsqueeze(-1)
+                    cy = coeffs['cy'].unsqueeze(-1)
+                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1], xx.shape[2], 5)
+                    inp = torch.cat((xx, coeff), dim=-1)
+                else:
+                    inp = xx
+                im, loss = model.get_loss(inp, yy[...,0], grid, sentence_embeddings, loss_fn)
             elif(isinstance(model, VisionTransformer)):
                 if(config['coeff']):
                     nu = coeffs['nu'].unsqueeze(-1)
@@ -403,8 +410,229 @@ def evaluate(test_loader, model, loss_fn, navier_stokes=True, config=None):
             test_l2_step += loss.item()
             test_l2_full += loss.item()
     return test_l2_full/(bn+1)
-                
 
+
+def run_pretraining(model_name, config, prefix):
+    #prefix = config['data_name'].split("_")[0]
+    path = "{}{}_{}/{}_{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], model_name, prefix)
+    f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
+    model_path = path + "/" + model_name
+
+    # Create the transformer model.
+    print(model_name)
+    transformer = get_model(model_name, config)
+    if(config['pretraining_num_samples'] == 0):
+        print("\nNO PRETRAINING\n")
+        return transformer
+
+    total_params = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
+    print(f'Total parameters = {total_params}')
+
+    # Get data as loaders
+    train_loader, val_loader, test_loader = new_get_data(f, config, pretraining=True)
+
+    ################################################################
+    # training and evaluation
+    ################################################################
+
+    if(config['return_text']):
+        #_data, _, _, _ = next(iter(val_loader))
+        _data, _, _, _ = next(iter(val_loader))
+    else:
+        _data, _, _ = next(iter(val_loader))
+    dimensions = len(_data.shape)
+    print('Spatial Dimension', dimensions - 3)
+
+    break_pretrain = config['pretraining_epochs'] == 0
+    if(break_pretrain):
+        config['pretraining_epochs'] += 1
+
+    # Use Adam as the optimizer.
+    optimizer = torch.optim.Adam(transformer.parameters(), lr=config['pretraining_learning_rate'],
+                                 weight_decay=config['pretraining_weight_decay'])
+
+    #TODO Make this step lr
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=config['pretraining_learning_rate'],# div_factor=1e6,
+                                                    steps_per_epoch=len(train_loader), epochs=config['pretraining_epochs'])
+
+    # Use mean squared error as the loss function.
+    loss_fn = nn.L1Loss(reduction='mean')
+    clip_loss_fn = nn.CrossEntropyLoss(reduction='mean')
+
+    # Train the transformer for the specified number of epochs.
+    train_losses = []
+    val_losses = []
+    loss_val_min = np.infty
+    #src_mask = generate_square_subsequent_mask(640).cuda()
+    lrs = []
+    shift = 0
+    print("\nPRETRAINNIG...")
+    for epoch in tqdm(range(config['pretraining_epochs'])):
+        if(break_pretrain):
+            config['pretraining_epochs'] -= 1
+            break
+        # Iterate over the training dataset.
+        train_loss = 0
+        times = []
+        max_val = 0
+        transformer.train()
+        #for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(train_loader):
+        for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(train_loader):
+            start = time.time()
+            #print()
+            #print(x0.shape)
+            #print()
+            if(config['train_style'] == 'next_step'):
+                raise
+            else:
+                y = x0[:, config['sim_time']].unsqueeze(-1)
+                x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
+
+            # Put data on correct device
+            x0 = x0.to(device).float()
+            y = y.to(device).float()
+
+            #tokens = tokens.to(device).float()
+            #t = t.to(device).float()
+            grid = grid.to(device).float()
+            sentence_embeddings = sentence_embeddings.to(device).float()
+
+            # Forward pass
+            if(config['coeff']):
+                nu = coeffs['nu'].unsqueeze(-1)
+                ax = coeffs['ax'].unsqueeze(-1)
+                ay = coeffs['ay'].unsqueeze(-1)
+                cx = coeffs['cx'].unsqueeze(-1)
+                cy = coeffs['cy'].unsqueeze(-1)
+                coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                inp = torch.cat((x0, coeff), dim=-1)
+            else:
+                inp = x0
+            #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
+            y_pred = transformer(inp, grid, sentence_embeddings, True)
+
+            labels = torch.arange(y_pred.shape[1]).to(device).repeat(y_pred.shape[0], 1)
+            loss = clip_loss_fn(y_pred, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+
+            scheduler.step()
+
+        train_loss /= (bn + 1)
+        train_losses.append(train_loss)
+
+        with torch.no_grad():
+            transformer.eval()
+            val_loss = 0
+            all_val_preds = []
+            #for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(val_loader):
+            for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(val_loader):
+                # Forward pass: compute predictions by passing the input sequence
+                # through the transformer.
+                # Put data on correct device
+                if(config['train_style'] == 'next_step'):
+                    raise
+                else:
+                    y = x0[:, config['sim_time']].unsqueeze(-1)
+                    x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
+
+                x0 = x0.to(device).float()
+                y = y.to(device).float()
+                #tokens = tokens.to(device).float()
+                #t = t.to(device).float()
+                grid = grid.to(device).float()
+
+                if(config['coeff']):
+                    nu = coeffs['nu'].unsqueeze(-1)
+                    ax = coeffs['ax'].unsqueeze(-1)
+                    ay = coeffs['ay'].unsqueeze(-1)
+                    cx = coeffs['cx'].unsqueeze(-1)
+                    cy = coeffs['cy'].unsqueeze(-1)
+                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                    inp = torch.cat((x0, coeff), dim=-1)
+                else:
+                    inp = x0
+                #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
+                y_pred = transformer(inp, grid, sentence_embeddings, True)
+
+                labels = torch.arange(y_pred.shape[1]).to(device).repeat(y_pred.shape[0], 1)
+                loss = clip_loss_fn(y_pred, labels)
+                val_loss += loss.item()
+
+                #y = y[...,0].to(device=device)#.cuda()
+                #if(bn == 0):
+                #    y_val_true = y.clone()
+                #    y_val_pred = y_pred.clone()
+                #all_val_preds.append(y_pred.detach())
+
+                ## Compute the loss.
+                #val_loss += loss_fn(y_pred, y).item()
+
+            if  val_loss < loss_val_min:
+                loss_val_min = val_loss
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': transformer.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': loss_val_min
+                    }, model_path)
+
+        val_loss /= (bn + 1)
+        val_losses.append(val_loss)
+
+        # Print the loss at the end of each epoch.
+        if(epoch%config['log_freq'] == 0):
+            np.save("./{}/pretraining_train_l2s_{}.npy".format(path, seed), train_losses)
+            np.save("./{}/pretraining_val_l2s_{}.npy".format(path, seed), val_losses)
+            np.save("./{}/pretraining_lrs_{}.npy".format(path, seed), lrs)
+            print(f"Epoch {epoch+1}: loss = {train_loss:.6f}\t val loss = {val_loss:.6f}")
+
+    test_vals = []
+    test_value = evaluate(test_loader, transformer, loss_fn, config=config)
+    test_vals.append(test_value)
+    print("TEST VALUE FROM LAST EPOCH: {0:5f}".format(test_value))
+    if(not break_pretrain):
+        transformer.load_state_dict(torch.load(model_path)['model_state_dict'])
+    test_value = evaluate(test_loader, transformer, loss_fn, config=config)
+    test_vals.append(test_value)
+    print("TEST VALUE BEST LAST EPOCH: {0:5f}".format(test_value))
+    np.save("{}{}_{}/{}_{}/pretraining_test_vals_{}.npy".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], model_name, prefix, seed), test_vals)
+
+    # Save the embeddings
+    if(seed == 0):
+        embs = []
+        all_coeffs = []
+        with torch.no_grad():
+            for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(train_loader):
+                x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
+
+                #emb = transformer.diff_x_proj(transformer.temporal_neural_operator(x0, grid).flatten(1,2))
+                #temporal_x = x0[...,1:] - x0[...,:-1]
+                if(config['coeff']):
+                    nu = coeffs['nu'].unsqueeze(-1)
+                    ax = coeffs['ax'].unsqueeze(-1)
+                    ay = coeffs['ay'].unsqueeze(-1)
+                    cx = coeffs['cx'].unsqueeze(-1)
+                    cy = coeffs['cy'].unsqueeze(-1)
+                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                    inp = torch.cat((x0, coeff), dim=-1)
+                else:
+                    inp = x0
+                emb = transformer(inp, grid, sentence_embeddings, True, True)
+
+                embs.append(emb)
+                all_coeffs.append(torch.vstack(list(coeffs.values())).transpose(0,1))
+
+        all_embs = torch.cat(embs, dim=0)
+        all_coeffs = torch.cat(all_coeffs, dim=0)
+        np.save("./{}/pretraining_embeddings_{}.npy".format(path, seed), all_embs.cpu().numpy())
+        np.save("./{}/pretraining_coeffs_{}.npy".format(path, seed), all_coeffs.cpu().numpy())
+
+    return transformer
+
+                
 def run_training(model, config, prefix):
     
     ################################################################
@@ -412,7 +640,7 @@ def run_training(model, config, prefix):
     ################################################################
     
     #prefix = config['data_name'].split("_")[0]
-    path = "{}{}/{}_{}".format(config['results_dir'], config['num_samples'], config['model_name'], prefix)
+    path = "{}{}_{}/{}_{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], config['model_name'], prefix)
     f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
     model_name = '{}'.format(config['model_name']) + "_{}.pt".format(seed)
     model_path = path + "/" + model_name
@@ -433,7 +661,7 @@ def run_training(model, config, prefix):
     
     if(config['return_text']):
         #_data, _, _, _, _ = next(iter(val_loader))
-        _data, _, _, = next(iter(val_loader))
+        _data, _, _, _ = next(iter(val_loader))
     else:
         _data, _, _ = next(iter(val_loader))
     dimensions = len(_data.shape)
@@ -478,7 +706,7 @@ def run_training(model, config, prefix):
         train_l2_step = 0
         train_l2_full = 0
         #for bn, (xx, yy, grid, tokens, t) in enumerate(train_loader):
-        for bn, (xx, grid, coeffs) in enumerate(train_loader):
+        for bn, (xx, grid, coeffs, sentence_embeddings) in enumerate(train_loader):
             
             # Put data on correct device
             if(config['train_style'] == 'next_step'):
@@ -494,24 +722,12 @@ def run_training(model, config, prefix):
             
             # Each model handles input differnetly
             if(isinstance(model, (FNO2d, OFormer2D))):
-                #if(navier_stokes):
-                #    x = torch.swapaxes(xx, 1, 3)
-                #    x = torch.swapaxes(x, 1, 2)
-                #else:
-                #    x = xx
-                if(config['coeff']):
-                    nu = coeffs['nu'].unsqueeze(-1)
-                    ax = coeffs['ax'].unsqueeze(-1)
-                    ay = coeffs['ay'].unsqueeze(-1)
-                    cx = coeffs['cx'].unsqueeze(-1)
-                    cy = coeffs['cy'].unsqueeze(-1)
-                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1],     xx.shape[2], 5)
-                    inp = torch.cat((xx, coeff), dim=-1)
+                if(navier_stokes):
+                    x = torch.swapaxes(xx, 1, 3)
+                    x = torch.swapaxes(x, 1, 2)
                 else:
-                    inp = xx
-                im, loss = model.get_loss(inp, yy[...,0], grid, loss_fn)
-
-                #im, loss = model.get_loss(x, yy[...,0], grid, loss_fn)
+                    x = xx
+                im, loss = model.get_loss(x, yy[...,0], grid, loss_fn)
             elif(isinstance(model, DeepONet2D)):
                 #if(navier_stokes):
                 #    x = torch.swapaxes(xx, 1, 3)
@@ -520,6 +736,19 @@ def run_training(model, config, prefix):
                 #    x = xx
                 im = model(xx, grid)
                 loss = loss_fn(yy[...,0], im)
+            elif(isinstance(model, CLIPFNO2d)):
+                if(config['coeff']):
+                    nu = coeffs['nu'].unsqueeze(-1)
+                    ax = coeffs['ax'].unsqueeze(-1)
+                    ay = coeffs['ay'].unsqueeze(-1)
+                    cx = coeffs['cx'].unsqueeze(-1)
+                    cy = coeffs['cy'].unsqueeze(-1)
+                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1], xx.shape[2], 5)
+                    inp = torch.cat((xx, coeff), dim=-1)
+                else:
+                    inp = xx
+                im, loss = model.get_loss(inp, yy[...,0], grid, sentence_embeddings, loss_fn)
+                #print(coeff.shape, xx.shape)
             elif(isinstance(model, VisionTransformer)):
                 if(config['coeff']):
                     nu = coeffs['nu'].unsqueeze(-1)
@@ -560,7 +789,7 @@ def run_training(model, config, prefix):
             model.eval()
             with torch.no_grad():
                 #for bn, (xx, yy, grid, tokens, t) in enumerate(val_loader):
-                for bn, (xx, grid, coeffs) in enumerate(val_loader):
+                for bn, (xx, grid, coeffs, sentence_embeddings) in enumerate(val_loader):
 
                     # Put data on correct device
                     if(config['train_style'] == 'next_step'):
@@ -576,24 +805,12 @@ def run_training(model, config, prefix):
                     
                     # Each model handles input differnetly
                     if(isinstance(model, (FNO2d, OFormer2D))):
-                        #if(navier_stokes):
-                        #    x = torch.swapaxes(xx, 1, 3)
-                        #    x = torch.swapaxes(x, 1, 2)
-                        #else:
-                        #    x = xx
-                        #im, loss = model.get_loss(x, yy[...,0], grid, loss_fn)
-                        if(config['coeff']):
-                            nu = coeffs['nu'].unsqueeze(-1)
-                            ax = coeffs['ax'].unsqueeze(-1)
-                            ay = coeffs['ay'].unsqueeze(-1)
-                            cx = coeffs['cx'].unsqueeze(-1)
-                            cy = coeffs['cy'].unsqueeze(-1)
-                            coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1],     xx.shape[2], 5)
-                            inp = torch.cat((xx, coeff), dim=-1)
+                        if(navier_stokes):
+                            x = torch.swapaxes(xx, 1, 3)
+                            x = torch.swapaxes(x, 1, 2)
                         else:
-                            inp = xx
-                        im, loss = model.get_loss(inp, yy[...,0], grid, loss_fn)
-
+                            x = xx
+                        im, loss = model.get_loss(x, yy[...,0], grid, loss_fn)
                     elif(isinstance(model, DeepONet2D)):
                         #if(navier_stokes):
                         #    x = torch.swapaxes(xx, 1, 3)
@@ -602,6 +819,18 @@ def run_training(model, config, prefix):
                         #    x = xx
                         im = model(xx, grid)
                         loss = loss_fn(yy[...,0], im)
+                    elif(isinstance(model, CLIPFNO2d)):
+                        if(config['coeff']):
+                            nu = coeffs['nu'].unsqueeze(-1)
+                            ax = coeffs['ax'].unsqueeze(-1)
+                            ay = coeffs['ay'].unsqueeze(-1)
+                            cx = coeffs['cx'].unsqueeze(-1)
+                            cy = coeffs['cy'].unsqueeze(-1)
+                            coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1], xx.shape[2], 5)
+                            inp = torch.cat((xx, coeff), dim=-1)
+                        else:
+                            inp = xx
+                        im, loss = model.get_loss(inp, yy[...,0], grid, sentence_embeddings, loss_fn)
                     elif(isinstance(model, VisionTransformer)):
                         if(config['coeff']):
                             nu = coeffs['nu'].unsqueeze(-1)
@@ -694,19 +923,19 @@ if __name__ == "__main__":
     prefix += '_coeff' if(train_args['coeff']) else ''
     if('electric' in train_args['data_name']):
         prefix = 'electric_' + prefix
-    os.makedirs("{}{}/{}_{}".format(train_args['results_dir'], train_args['num_samples'], model_name, prefix), exist_ok=True)
+    os.makedirs("{}{}_{}/{}_{}".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'], model_name, prefix), exist_ok=True)
     shutil.copy("./configs/2d_{}_config.yaml".format(model_name),
-                "{}{}/{}_{}/2d_{}_config.yaml".format(train_args['results_dir'], train_args['num_samples'], model_name, prefix, model_name))
-    shutil.copy("./plot_progress.py", "{}{}/{}_{}/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'], model_name, prefix))
-
+                "{}{}_{}/{}_{}/2d_{}_config.yaml".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'], model_name, prefix, model_name))
+    shutil.copy("./plot_progress.py", "{}{}_{}/{}_{}/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'], model_name, prefix))
+    shutil.copy("./pretrain_plot_progress.py", "{}{}_{}/{}_{}/pretrain_plot_progress.py".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'], model_name, prefix))
 
     for seed in range(train_args.pop('num_seeds')):
         torch.manual_seed(seed)
         np.random.seed(seed)
         train_args['seed'] = seed
 
-        model = get_model(model_name, train_args)
+        #model = get_model(model_name, train_args)
+        model = run_pretraining(model_name, train_args, prefix)
         run_training(model, train_args, prefix)
     print("Done.")
-
 
