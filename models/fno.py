@@ -31,6 +31,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
+from sentence_transformers import SentenceTransformer, InputExample
 
 #import torch_dct as dct
 
@@ -274,7 +275,7 @@ class FNO2d(nn.Module):
     
 
 class CLIPFNO2d(nn.Module):
-    def __init__(self, num_channels, modes1=12, modes2=12, width=20, initial_step=10, dropout=0.1, embed_dim=32):
+    def __init__(self, num_channels, modes1=12, modes2=12, width=20, initial_step=10, dropout=0.1, embed_dim=32, llm_dim=384):
         super(CLIPFNO2d, self).__init__()
 
         """
@@ -316,7 +317,8 @@ class CLIPFNO2d(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         self.sentence_proj = nn.Sequential(
-                                 nn.Linear(384, embed_dim),
+                                 #nn.Linear(384, embed_dim),
+                                 nn.Linear(llm_dim, embed_dim),
                                  nn.ReLU(),
                                  nn.Linear(embed_dim, embed_dim),
                                  nn.ReLU(),
@@ -367,11 +369,14 @@ class CLIPFNO2d(nn.Module):
         x = self.fc0(x)
         x = x.permute(0, 3, 1, 2)
         
+        # Pad tensor with boundary condition
         x = F.pad(x, [0, self.padding, 0, self.padding])
+        x1 = self.conv0(x)
+        x2 = self.w0(x)
+        x = x1 + x2
         x = F.gelu(x)
         x = self.dropout(x)
 
-        # Pad tensor with boundary condition
         x1 = self.conv1(x)
         x2 = self.w1(x)
         x = x1 + x2
@@ -384,6 +389,159 @@ class CLIPFNO2d(nn.Module):
         x = F.gelu(x)
         x = self.dropout(x)
 
+        x1 = self.conv3(x)
+        x2 = self.w3(x)
+        x = x1 + x2
+
+        x = x[..., :-self.padding, :-self.padding] # Unpad the tensor
+        x = x.permute(0, 2, 3, 1)
+        x = self.fc1(x)
+        x = F.gelu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+
+        return x.unsqueeze(-2)
+
+
+    def get_loss(self, x, y, grid, sentence_embeddings, loss_fn):
+        y_pred = self.forward(x, grid, sentence_embeddings)[...,0,0]
+        return y_pred, loss_fn(y_pred, y)
+
+
+class LLMFNO2d(nn.Module):
+    def __init__(self, num_channels, modes1=12, modes2=12, width=20, initial_step=10, dropout=0.1, embed_dim=32, llm_dim=384,
+                 llm=None):
+        super(LLMFNO2d, self).__init__()
+
+        """
+        The overall network. It contains 4 layers of the Fourier layer.
+        1. Lift the input to the desire channel dimension by self.fc0 .
+        2. 4 layers of the integral operators u' = (W + K)(u).
+            W defined by self.w; K defined by self.conv .
+        3. Project from the channel space to the output space by self.fc1 and self.fc2 .
+        
+        input: the solution of the previous 10 timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
+        input shape: (batchsize, x, y, c)
+        output: the solution of the next timestep
+        output shape: (batchsize, x, y, c)
+        """
+
+        self.modes1 = modes1
+        self.modes2 = modes2
+        self.width = width
+        self.padding = 2 # pad the domain if input is non-periodic
+        if(llm is not None):
+            self.llm = SentenceTransformer(llm, device='cuda')
+
+        self.fc0 = nn.Linear(initial_step*num_channels+2, self.width)
+        #self.fc0 = nn.Linear(initial_step*num_channels+2+1, self.width)
+
+        # input channel is 12: the solution of the previous 10 timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
+
+        self.conv0 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+        self.conv1 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+        self.conv2 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+
+        # Choose whether or not to add conditioning information here.
+        #self.conv3 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)  # No
+        self.conv3 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2) # Yes
+
+        self.w0 = nn.Conv2d(self.width+1, self.width, 1)
+        self.w1 = nn.Conv2d(self.width+1, self.width, 1)
+        self.w2 = nn.Conv2d(self.width+1, self.width, 1)
+
+        # Choose whether or not to add conditioning information here.
+        #self.w3 = nn.Conv2d(self.width, self.width, 1)  # No
+        self.w3 = nn.Conv2d(self.width+1, self.width, 1) # Yes
+
+        self.fc1 = nn.Linear(self.width, 128)
+        self.fc2 = nn.Linear(128, num_channels)
+        self.dropout = nn.Dropout(dropout)
+
+        self.sentence_proj = nn.Sequential(
+                                 #nn.Linear(384, embed_dim),
+                                 nn.Linear(llm_dim, embed_dim),
+                                 nn.ReLU(),
+                                 nn.Linear(embed_dim, embed_dim),
+                                 nn.ReLU(),
+                                 nn.Linear(embed_dim, embed_dim//2)
+        )
+        self.x_proj = nn.Sequential(
+                                 #nn.Linear(32**3, embed_dim),
+                                 nn.Linear((initial_step*num_channels+2)*32*32, embed_dim),
+                                 #nn.Linear(32*34*34, embed_dim),
+                                 #nn.Linear(32**2, embed_dim),
+                                 nn.SiLU(),
+                                 nn.Linear(embed_dim, embed_dim),
+                                 nn.SiLU(),
+                                 nn.Linear(embed_dim, embed_dim//2)
+        )
+        self.proj_up = nn.Sequential(
+                                 nn.Linear(32, 128),
+                                 nn.SiLU(),
+                                 nn.Linear(128, 256),
+                                 nn.SiLU(),
+                                 #nn.Linear(256, 32*32)
+                                 nn.Linear(256, 34*34)
+        )
+
+    @torch.enable_grad()
+    def _llm_forward(self, sentence):
+        tokenized_sentences = self.llm.tokenize(sentence)
+        output = self.llm(tokenized_sentences)['sentence_embedding']
+        return output
+
+    def forward(self, x, grid, sentence_embeddings, clip=False, return_embedding=False):
+        # x dim = [b, x1, x2, t*v]
+        x = torch.cat((x, grid), dim=-1)
+
+        # During pretraining get embedding from model output
+        x_emb = self.x_proj(x.flatten(1,3))
+
+        # Embed and project sentences
+        sentence_emb = self._llm_forward(sentence_embeddings)
+        sentence_emb = self.sentence_proj(sentence_emb)
+        if(return_embedding):
+            return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1)
+        if(clip):
+            cross_corr = torch.bmm(x_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
+            return cross_corr
+        #else:
+        #    embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)#.detach()
+        #    embedding = self.proj_up(embedding)
+        #    x = torch.cat((x, embedding.reshape((x.shape[0], 32, 32, 1))), dim=-1)
+
+        # Get embedding
+        embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1).detach()
+        embedding = self.proj_up(embedding).reshape((x.shape[0], 1, 34, 34))
+
+        x = self.fc0(x)
+        x = x.permute(0, 3, 1, 2)
+
+        # Pad tensor with boundary condition
+        x = F.pad(x, [0, self.padding, 0, self.padding])
+        x = torch.cat((x, embedding), dim=1) # Add conditioning information to every layer
+        x1 = self.conv0(x)
+        x2 = self.w0(x)
+        x = x1 + x2
+        x = F.gelu(x)
+        x = self.dropout(x)
+
+        x = torch.cat((x, embedding), dim=1) # Add conditioning information to every layer
+        x1 = self.conv1(x)
+        x2 = self.w1(x)
+        x = x1 + x2
+        x = F.gelu(x)
+        x = self.dropout(x)
+
+        x = torch.cat((x, embedding), dim=1) # Add conditioning information to every layer
+        x1 = self.conv2(x)
+        x2 = self.w2(x)
+        x = x1 + x2
+        x = F.gelu(x)
+        x = self.dropout(x)
+
+        x = torch.cat((x, embedding), dim=1) # Add conditioning information to every layer
         x1 = self.conv3(x)
         x2 = self.w3(x)
         x = x1 + x2

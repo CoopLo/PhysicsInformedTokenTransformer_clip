@@ -299,6 +299,7 @@ def new_get_data(f, config, pretraining=False):
             num_samples=config['num_samples'],
             clip=config['embedding'] == 'clip',
             downsample=config['downsample'],
+            llm=config['llm'],
     )
     val_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_valid_large.h5",
@@ -313,6 +314,7 @@ def new_get_data(f, config, pretraining=False):
             num_samples=config['num_samples'],
             clip=config['embedding'] == 'clip',
             downsample=config['downsample'],
+            llm=config['llm'],
     )
     test_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_test_large.h5",
@@ -327,6 +329,7 @@ def new_get_data(f, config, pretraining=False):
             num_samples=config['num_samples'],
             clip=config['embedding'] == 'clip',
             downsample=config['downsample'],
+            llm=config['llm'],
     )
     batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
@@ -691,6 +694,7 @@ if __name__ == "__main__":
     train_args['model_name'] = model_name
     device = train_args['device']#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     prefix = train_args['data_name'].split("_")[0] + "_" + train_args['train_style']
+    prefix += '_{}'.format(train_args['llm']) if(train_args['llm'] != None) else ''
     prefix += '_coeff' if(train_args['coeff']) else ''
     if('electric' in train_args['data_name']):
         prefix = 'electric_' + prefix

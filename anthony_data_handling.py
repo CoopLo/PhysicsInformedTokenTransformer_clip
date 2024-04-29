@@ -6,7 +6,7 @@ from torch.nn import functional as F
 from typing import Tuple
 #from common.augmentation import to_coords
 import random
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, InputExample
 from tqdm import tqdm
 
 class PDEDataset(Dataset):
@@ -144,6 +144,8 @@ class PDEDataset2D(Dataset):
                  device: str='cuda:0',
                  num_samples: int=-1,
                  clip: bool=False,
+                 llm: str=None,
+                 sentence: bool=False,
                  downsample: int=1) -> None:
         """Initialize the dataset object
         Args:
@@ -164,6 +166,7 @@ class PDEDataset2D(Dataset):
         self.pde = pde
         self.downsample = downsample
         self.resolution = (100, 64, 64) if resolution is None else resolution
+        self.llm = llm
         self.data = f[self.mode]
         if(mode == 'train'):
             self.num_samples = len(self.data["u"])+2 if(num_samples == -1) else num_samples
@@ -221,16 +224,21 @@ class PDEDataset2D(Dataset):
 
         # Use LLM if CLIP
         self.clip = clip
-        if(self.clip):
-            self.sentence_embedder = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
-            self.sentence_embeddings = []
-            print("Getting sentence embeddings...")
-            #ratios = []
-            #advs = []
-            for idx in tqdm(range(self.u.shape[0])):
-                # Case by case each equation
-                #print(idx, self.nu[idx], self.ax[idx], self.ay[idx], self.cx[idx], self.cy[idx])
+        self.sentence = sentence
+        if(self.clip or self.sentence):
 
+            # Only get sentence_embedder if we're not returning whole sentences
+            if(self.llm is not None and not self.sentence):
+                #self.sentence_embedder = SentenceTransformer(self.llm, device='cpu')
+                print("LOADING LLM TO GPU")
+                self.sentence_embedder = SentenceTransformer(self.llm, device='cuda')
+            elif(not self.sentence):
+                self.sentence_embedder = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
+
+            self.sentence_embeddings = []
+            self.sentences = []
+            print("Getting sentence embeddings...")
+            for idx in tqdm(range(self.u.shape[0])):
                 # Burgers
                 if(self.nu[idx] != 0 and self.cx[idx] != 0 and self.cy[idx] != 0):
                     ratio = ((self.cx[idx] + self.cy[idx])**2)**(0.5)/self.nu[idx]
@@ -242,6 +250,7 @@ class PDEDataset2D(Dataset):
                     cls = 'strongly' if(ratio > 100) else 'weakly'
                     sim = ' not ' if(ratio > 100) else ' '
                     sentence += ' This system is {} advection dominanted and does{}behave similarly to heat equation.'.format(cls, sim)
+                    sentence += ' The predicted state should look like the input but shifted in space.'
                 # Advection
                 elif(self.ax[idx] != 0 and self.ay[idx] != 0):
                     adv = ((self.ax[idx] + self.ay[idx])**2)**(0.5)
@@ -252,6 +261,7 @@ class PDEDataset2D(Dataset):
 
                     cls = 'strongly' if(adv > 2) else 'weakly'
                     sentence += ' This system is {} advective.'.format(cls)
+                    sentence += ' Ths predicted state should have shocks.' if(cls == 'strongly') else ' The predicted state should look smoother than the inputs'
                 # Heat
                 elif(self.nu[idx] != 0 and self.cx[idx] == 0 and self.cy[idx] == 0):
                     sentence = 'The Heat equation models how a quantity such as heat diffuses through a given region.'
@@ -259,20 +269,25 @@ class PDEDataset2D(Dataset):
                     sentence += ' In this case, the diffusion term has a coefficient of {}.'.format(self.nu[idx])
 
                     cls = 'strongly' if(self.nu[idx] > 0.01) else 'weakly'
-                    sentence += 'This system is {} diffusive.'.format(cls)
+                    sentence += ' This system is {} diffusive.'.format(cls)
+                    sentence += ' The predicted state should look smoother than the inputs.'
 
-                self.sentence_embeddings.append(self.sentence_embedder.encode(sentence))
+                sentence += " Give me an embedding that is useful for numerically predicting the target state."
+                if(self.sentence):
+                    while(len(sentence) < 650): # Pad them to have same length
+                        sentence += ' '
+                    if(len(sentence) > 650):
+                        print(len(sentence))
+                        raise
+                    self.sentences.append(sentence)
+                    #self.sentences.append(InputExample(texts=[sentence], label=0.0))
+                else:
+                    self.sentence_embeddings.append(self.sentence_embedder.encode(sentence))
             print("Done.")
-            #advs = torch.Tensor(advs)
-            #ratios = torch.Tensor(ratios)
-            #print(advs.max(), advs.min())
-            #print(ratios.max(), ratios.min())
-        #raise
 
     def __len__(self):
         return self.length
 
-    
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, torch.Tensor]:
         """
         Get data item
@@ -303,6 +318,8 @@ class PDEDataset2D(Dataset):
 
         if(self.clip):
             return u, x.permute(1,2,0), variables, self.sentence_embeddings[idx]
+        elif(self.sentence):
+            return u, x.permute(1,2,0), variables, self.sentences[idx]
         else:
             return u, x.permute(1,2,0), variables
     
