@@ -146,7 +146,8 @@ class PDEDataset2D(Dataset):
                  clip: bool=False,
                  llm: str=None,
                  sentence: bool=False,
-                 downsample: int=1) -> None:
+                 downsample: int=1,
+                 debug: bool=False) -> None:
         """Initialize the dataset object
         Args:
             path: path to dataset
@@ -167,11 +168,13 @@ class PDEDataset2D(Dataset):
         self.downsample = downsample
         self.resolution = (100, 64, 64) if resolution is None else resolution
         self.llm = llm
+        self.debug = debug
         self.data = f[self.mode]
+
         if(mode == 'train'):
             self.num_samples = len(self.data["u"])+2 if(num_samples == -1) else num_samples
         else:
-            self.num_samples = 768 # Use entire validation set
+            self.num_samples = 50 if(self.debug) else 768 # Use entire validation set
 
         idxs = torch.randperm(self.data["u"].shape[0])[:self.num_samples].cpu().numpy()
 
@@ -321,8 +324,9 @@ class PDEDataset2D(Dataset):
         elif(self.sentence):
             return u, x.permute(1,2,0), variables, self.sentences[idx]
         else:
-            return u, x.permute(1,2,0), variables
+            return u, x.permute(1,2,0), variables, self.sentence_embeddings[idx]
     
+
     def get_PDE(self, variables):
         if variables['ax'] != 0 and variables['ay'] != 0:
             return "advection"

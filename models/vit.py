@@ -135,7 +135,8 @@ class CLIPVisionTransformer(nn.Module):
     """
     Vision Transformer model for image-to-image tasks with overlapping patches.
     """
-    def __init__(self, img_size=224, patch_size=16, stride=8, in_chans=3, out_chans=3, embed_dim=768, depth=12, n_heads=12, mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0.):
+    def __init__(self, img_size=224, patch_size=16, stride=8, in_chans=3, out_chans=3, embed_dim=768, depth=12, n_heads=12,
+                 mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0., llm=None):
         super().__init__()
         self.patch_embed = PatchEmbed(img_size, patch_size, stride, in_chans, embed_dim)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -143,6 +144,7 @@ class CLIPVisionTransformer(nn.Module):
         self.pos_drop = nn.Dropout(p=drop_rate)
         self.out_chans = out_chans
         self.patch_size = patch_size
+        self.llm = llm
 
         self.blocks = nn.ModuleList([
             Block(embed_dim, n_heads, mlp_ratio, qkv_bias, drop_rate, attn_drop_rate)
@@ -158,8 +160,9 @@ class CLIPVisionTransformer(nn.Module):
 
         # Hard-coded For CLIP
         #self.sentence_proj = nn.Linear(384, embed_dim//2)
+        input_embed_dim = 768 if(self.llm == 'all-mpnet-base-v2') else 384
         self.sentence_proj = nn.Sequential(
-                                 nn.Linear(384, embed_dim),
+                                 nn.Linear(input_embed_dim, embed_dim),
                                  nn.ReLU(),
                                  nn.Linear(embed_dim, embed_dim),
                                  nn.ReLU(),
@@ -186,10 +189,11 @@ class CLIPVisionTransformer(nn.Module):
         sentence_emb = self.sentence_proj(sentence_embeddings)
         token_emb = self.x_proj(x.flatten(1,2))
         if(return_embedding):
-            return torch.cat((sentence_emb.unsqueeze(-1), token_emb.unsqueeze(-1)), dim=-1)
+            cross_corr = token_emb @ sentence_emb.T
+            return torch.cat((sentence_emb.unsqueeze(-1), token_emb.unsqueeze(-1)), dim=-1), cross_corr
 
         if(clip):
-            cross_corr = torch.bmm(token_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
+            cross_corr = token_emb @ sentence_emb.T
             return cross_corr
         else:
             embedding = torch.cat((token_emb, sentence_emb), dim=-1).unsqueeze(1).detach()

@@ -28,6 +28,8 @@ import sys
 
 device = 'cuda' if(torch.cuda.is_available()) else 'cpu'
 
+DEBUG = False
+
 
 def custom_collate(batch):
     x0 = torch.empty((len(batch), batch[0][0].shape[0]))
@@ -133,7 +135,7 @@ def generate_square_subsequent_mask(sz: int):
     return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
 
 
-def new_get_data(f, config, pretraining=False):
+def new_get_data(config, pretraining=False):
     train_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_train_large.h5",
             pde="Heat, Burgers, Advection",
@@ -146,7 +148,9 @@ def new_get_data(f, config, pretraining=False):
             device='cuda:0',
             num_samples=config['pretraining_num_samples'] if(pretraining) else config['num_samples'],
             clip=config['clip'],
-            downsample=config['downsample']
+            llm=config['llm'],
+            downsample=config['downsample'],
+            debug=DEBUG,
     )
     val_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_valid_large.h5",
@@ -158,9 +162,11 @@ def new_get_data(f, config, pretraining=False):
             shift='None',
             load_all=True,
             device='cuda:0',
-            num_samples=config['num_samples'],
+            num_samples=1000,
             clip=config['clip'],
-            downsample=config['downsample']
+            downsample=config['downsample'],
+            llm=config['llm'],
+            debug=DEBUG,
     )
     test_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_test_large.h5",
@@ -172,9 +178,11 @@ def new_get_data(f, config, pretraining=False):
             shift='None',
             load_all=True,
             device='cuda:0',
-            num_samples=config['num_samples'],
+            num_samples=1000,
             clip=config['clip'],
-            downsample=config['downsample']
+            llm=config['llm'],
+            downsample=config['downsample'],
+            debug=DEBUG,
     )
     batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
@@ -219,28 +227,29 @@ def get_neural_operator(model_name, config, temporal=False):
 
 def get_transformer(model_name, config):
     # Create the transformer model.
-    if(config['embedding'] == "standard"):
-        print("\n USING STANDARD EMBEDDING")
-        neural_operator = get_neural_operator(config['neural_operator'], config)
-        transformer = StandardPhysicsInformedTokenTransformer2D(100, config['hidden'], config['layers'], config['heads'],
-                                        output_dim1=config['num_x'], output_dim2=config['num_y'], dropout=config['dropout'],
-                                        neural_operator=neural_operator).to(device=device)
-    elif(config['embedding'] == "novel"):
-        print("\nUSING NOVEL EMBEDDING")
-        neural_operator = get_neural_operator(config['neural_operator'], config)
-        transformer = PhysicsInformedTokenTransformer2D(100, config['hidden'], config['layers'], config['heads'],
-                                        output_dim1=config['num_x'], output_dim2=config['num_y'], dropout=config['dropout'],
-                                        neural_operator=neural_operator).to(device=device)
-    elif(config['embedding'] == "clip"):
-        print("\nUSING CLIP EMBEDDING")
-        neural_operator = get_neural_operator(config['neural_operator'], config)
-        temporal_neural_operator = get_neural_operator(config['neural_operator'], config, temporal=True)
-        #transformer = CLIPPhysicsInformedTokenTransformer2D(100, config['hidden'], config['layers'], config['heads'],
-        transformer = CLIPTransformer2D(100, config['hidden'], config['layers'], config['heads'],
-                                        output_dim1=config['num_x'], output_dim2=config['num_y'], dropout=config['dropout'],
-                                        neural_operator=neural_operator, temporal_neural_operator=temporal_neural_operator,
-                                        latent_dim=config['latent_dim']).to(device=device)
-    elif(model_name == 'vit'):
+    #if(config['embedding'] == "standard"):
+    #    print("\n USING STANDARD EMBEDDING")
+    #    neural_operator = get_neural_operator(config['neural_operator'], config)
+    #    transformer = StandardPhysicsInformedTokenTransformer2D(100, config['hidden'], config['layers'], config['heads'],
+    #                                    output_dim1=config['num_x'], output_dim2=config['num_y'], dropout=config['dropout'],
+    #                                    neural_operator=neural_operator).to(device=device)
+    #elif(config['embedding'] == "novel"):
+    #    print("\nUSING NOVEL EMBEDDING")
+    #    neural_operator = get_neural_operator(config['neural_operator'], config)
+    #    transformer = PhysicsInformedTokenTransformer2D(100, config['hidden'], config['layers'], config['heads'],
+    #                                    output_dim1=config['num_x'], output_dim2=config['num_y'], dropout=config['dropout'],
+    #                                    neural_operator=neural_operator).to(device=device)
+    #elif(config['embedding'] == "clip"):
+    #    print("\nUSING CLIP EMBEDDING")
+    #    neural_operator = get_neural_operator(config['neural_operator'], config)
+    #    temporal_neural_operator = get_neural_operator(config['neural_operator'], config, temporal=True)
+    #    #transformer = CLIPPhysicsInformedTokenTransformer2D(100, config['hidden'], config['layers'], config['heads'],
+    #    transformer = CLIPTransformer2D(100, config['hidden'], config['layers'], config['heads'],
+    #                                    output_dim1=config['num_x'], output_dim2=config['num_y'], dropout=config['dropout'],
+    #                                    neural_operator=neural_operator, temporal_neural_operator=temporal_neural_operator,
+    #                                    latent_dim=config['latent_dim']).to(device=device)
+    if(model_name == 'vit'):
+        print("USING CLIP VISION TRANSFORMER\n")
         transformer = CLIPVisionTransformer(
                    img_size=config['img_size'],
                    patch_size=config['patch_size'],
@@ -254,41 +263,140 @@ def get_transformer(model_name, config):
                    drop_rate=config['drop_rate'],
                    attn_drop_rate=config['attn_drop_rate'],
                    stride=config['patch_stride'],
+                   llm=config['llm'],
         )
 
     else:
-        raise ValueError("Invalid embedding choice.")
+        raise ValueError("Invalid model choice.")
     return transformer
 
 
+def generate_pretraining_labels(config, coeffs, y_pred):
+    if(config['pretraining_loss'] == 'clip'):
+        # Only interested in diagonal
+        labels = torch.arange(y_pred.shape[0]).to(device)
+
+    elif(config['pretraining_loss'] == 'weightedclip'):
+        # Take magnitude-aware cosine similarity between coefficients
+        sim_mat = torch.sqrt(torch.sum((coeffs.unsqueeze(0) * coeffs.unsqueeze(1)).abs(), dim=-1))
+        norm_vec = torch.max(torch.cat((coeffs.norm(dim=-1).unsqueeze(-1),
+                                        coeffs.norm(dim=-1).unsqueeze(-1)), dim=-1), dim=-1)[0]
+        norm_mat1 = torch.ones(coeffs.shape[0]).unsqueeze(0).to(norm_vec.device) * norm_vec.unsqueeze(1)
+        norm_mat2 = norm_vec.unsqueeze(0) * torch.ones(coeffs.shape[0]).unsqueeze(1).to(norm_vec.device)
+        norm_mat = torch.cat((norm_mat1.unsqueeze(-1), norm_mat2.unsqueeze(-1)), dim=-1).max(dim=-1)[0]
+        sim_mat /= norm_mat
+
+    return labels
+
+
+def get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn):
+
+    # Select data for input and target
+    if(config['train_style'] == 'next_step'):
+        raise NotImplementedError("Need to implement next step.")
+    elif(config['train_style'] == 'fixed_future'):
+        y = x0[:, config['sim_time']]
+        x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
+
+    # Put data on correct device
+    x0 = x0.to(device).float()
+    y = y.to(device).float()
+    grid = grid.to(device).float()
+    sentence_embeddings = sentence_embeddings.to(device).float()
+
+    if(config['coeff']):
+
+        # Get all coefficients
+        nu = coeffs['nu'].unsqueeze(-1)
+        ax = coeffs['ax'].unsqueeze(-1)
+        ay = coeffs['ay'].unsqueeze(-1)
+        cx = coeffs['cx'].unsqueeze(-1)
+        cy = coeffs['cy'].unsqueeze(-1)
+
+        # Stack coefficients together
+        coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],
+                                                                                               x0.shape[2], 5)
+        # Stack data and coefficients (TODO: Do we really need grid information for ViT?)
+        inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+    else:
+        inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
+
+    # Forward pass
+    y_pred = transformer(inp, sentence_embeddings, clip=True)
+    labels = generate_pretraining_labels(config, coeffs, y_pred)
+    loss = loss_fn(y_pred, labels)
+    return loss
+
+
+def save_embeddings(config, path, transformer, loader, train=True, seed=0):
+    embs = []
+    all_coeffs = []
+    all_sim_mats = []
+    with torch.no_grad():
+        for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(loader):
+            x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
+
+            if(config['coeff']):
+                nu = coeffs['nu'].unsqueeze(-1)
+                ax = coeffs['ax'].unsqueeze(-1)
+                ay = coeffs['ay'].unsqueeze(-1)
+                cx = coeffs['cx'].unsqueeze(-1)
+                cy = coeffs['cy'].unsqueeze(-1)
+                coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
+                inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+            else:
+                inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
+            emb, sim_mat = transformer(inp, sentence_embeddings, False, True) # Get stacked embeddings
+
+            embs.append(emb)
+            all_coeffs.append(torch.vstack(list(coeffs.values())).transpose(0,1))
+
+            if(sim_mat.shape[0] == config['pretraining_batch_size']):
+                all_sim_mats.append(sim_mat.unsqueeze(0))
+
+    all_embs = torch.cat(embs, dim=0)
+    all_coeffs = torch.cat(all_coeffs, dim=0)
+    all_sim_mats = torch.cat(all_sim_mats, dim=0)
+
+    split = "train" if(train) else "val"
+    np.save("./{}/pretraining_{}_embeddings_{}.npy".format(path, split, seed), all_embs.cpu().numpy())
+    np.save("./{}/pretraining_{}_coeffs_{}.npy".format(path, split, seed), all_coeffs.cpu().numpy())
+    np.save("./{}/pretraining_{}_sim_mats_{}.npy".format(path, split, seed), all_sim_mats.cpu().numpy())
+
+
 def run_pretraining(config, prefix):
-    #prefix = config['data_name'].split("_")[0]
-    path = "{}{}_{}/{}_vit".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
-    f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
-    model_name = 'pretraining_vit' + "_{}.pt".format(seed)
+    path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
+    pretrained_path = "{}{}_{}/{}".format(config['pretrained_model_path'], config['num_samples'],
+                                          config['pretraining_num_samples'], prefix)
+
+    model_name = 'pretraining' + "_{}.pt".format(seed)
     model_path = path + "/" + model_name
+    pretrained_model_path = pretrained_path + "/" + model_name
 
     # Create the transformer model.
     transformer = get_transformer('vit', config)
     if(config['pretraining_num_samples'] == 0):
         print("\nNO PRETRAINING\n")
         return transformer
+    if(config['load_pretrained']):
+        try:
+            transformer.load_state_dict(torch.load(pretrained_model_path)['model_state_dict'])
+            print("\nSUCCESSFULLY LOADED PRETRAINED MODEL\n")
+            return transformer
+        except:
+            print("\nNO PRETRAINED MODEL FOUND AT: {}. RUNNING PRETRAINIG.\n".format(pretrained_model_path))
 
     total_params = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
     print(f'Total parameters = {total_params}')
 
     # Get data as loaders
-    train_loader, val_loader, test_loader = new_get_data(f, config, pretraining=True)
+    train_loader, val_loader, test_loader = new_get_data(config, pretraining=True)
 
     ################################################################
     # training and evaluation
     ################################################################
 
-    if(config['return_text']):
-        #_data, _, _, _, _, _ = next(iter(val_loader))
-        _data, _, _, _ = next(iter(val_loader))
-    else:
-        _data, _, _ = next(iter(val_loader))
+    _data, _, _, _ = next(iter(val_loader))
     dimensions = len(_data.shape)
     print('Spatial Dimension', dimensions - 3)
 
@@ -300,8 +408,7 @@ def run_pretraining(config, prefix):
                                                     steps_per_epoch=len(train_loader), epochs=config['pretraining_epochs'])
     
     # Use mean squared error as the loss function.
-    loss_fn = nn.L1Loss(reduction='mean')
-    clip_loss_fn = nn.CrossEntropyLoss(reduction='mean')
+    loss_fn = nn.CrossEntropyLoss(reduction='mean') if(config['pretraining_loss'] == 'clip') else nn.L1Loss(reduction='mean')
     
     # Train the transformer for the specified number of epochs.
     train_losses = []
@@ -314,49 +421,19 @@ def run_pretraining(config, prefix):
     for epoch in tqdm(range(config['pretraining_epochs'])):
         # Iterate over the training dataset.
         train_loss = 0
-        times = []
         max_val = 0
         transformer.train()
-        #for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(train_loader):
         for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(train_loader):
             start = time.time()
-            #print()
-            #print(x0.shape)
-            #print()
-            y = x0[:, config['sim_time']].unsqueeze(-1)
-            x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
+            loss = get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn)
 
-            # Put data on correct device
-            x0 = x0.to(device).float()
-            y = y.to(device).float()
-
-            #tokens = tokens.to(device).float()
-            #t = t.to(device).float()
-            grid = grid.to(device).float()
-            sentence_embeddings = sentence_embeddings.to(device).float()
-
-            # Forward pass
-            if(config['coeff']):
-                nu = coeffs['nu'].unsqueeze(-1)
-                ax = coeffs['ax'].unsqueeze(-1)
-                ay = coeffs['ay'].unsqueeze(-1)
-                cx = coeffs['cx'].unsqueeze(-1)
-                cy = coeffs['cy'].unsqueeze(-1)
-                coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
-                inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
-            else:
-                inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
-            #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
-            y_pred = transformer(inp, sentence_embeddings, True)
-
-            labels = torch.arange(y_pred.shape[1]).to(device).repeat(y_pred.shape[0], 1)
-            loss = clip_loss_fn(y_pred, labels)
+            # Do optimizer and scheduler steps
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
-
             scheduler.step()
+
+            train_loss += loss.item()
 
         train_loss /= (bn + 1)
         train_losses.append(train_loss)
@@ -364,47 +441,11 @@ def run_pretraining(config, prefix):
         with torch.no_grad():
             transformer.eval()
             val_loss = 0
-            all_val_preds = []
-            #for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(val_loader):
             for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(val_loader):
-                # Forward pass: compute predictions by passing the input sequence
-                # through the transformer.
-                # Put data on correct device
-                y = x0[:, config['sim_time']].unsqueeze(-1)
-                x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
-
-                x0 = x0.to(device).float()
-                y = y.to(device).float()
-                #tokens = tokens.to(device).float()
-                #t = t.to(device).float()
-                grid = grid.to(device).float()
-
-                if(config['coeff']):
-                    nu = coeffs['nu'].unsqueeze(-1)
-                    ax = coeffs['ax'].unsqueeze(-1)
-                    ay = coeffs['ay'].unsqueeze(-1)
-                    cx = coeffs['cx'].unsqueeze(-1)
-                    cy = coeffs['cy'].unsqueeze(-1)
-                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
-                    inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
-                else:
-                    inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
-                #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
-                y_pred = transformer(inp, sentence_embeddings, True)
-
-                labels = torch.arange(y_pred.shape[1]).to(device).repeat(y_pred.shape[0], 1)
-                loss = clip_loss_fn(y_pred, labels)
+                loss = get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn)
                 val_loss += loss.item()
 
-                #y = y[...,0].to(device=device)#.cuda()
-                #if(bn == 0):
-                #    y_val_true = y.clone()
-                #    y_val_pred = y_pred.clone()
-                #all_val_preds.append(y_pred.detach())
-    
-                ## Compute the loss.
-                #val_loss += loss_fn(y_pred, y).item()
-
+            # Save best model so far
             if  val_loss < loss_val_min:
                 loss_val_min = val_loss
                 torch.save({
@@ -432,47 +473,63 @@ def run_pretraining(config, prefix):
     test_value = evaluate(test_loader, transformer, loss_fn, config=config)
     test_vals.append(test_value)
     print("TEST VALUE BEST LAST EPOCH: {0:5f}".format(test_value))
-    np.save("{}{}_{}/{}_vit/pretraining_test_vals_{}.npy".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix, seed), test_vals)
+    np.save("{}{}_{}/{}/pretraining_test_vals_{}.npy".format(config['results_dir'], config['num_samples'],
+                                                             config['pretraining_num_samples'], prefix, seed), test_vals)
+
+    os.makedirs(pretrained_path, exist_ok=True)
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': transformer.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss_val_min
+        }, pretrained_model_path)
 
     # Save the embeddings
     if(seed == 0):
-        embs = []
-        all_coeffs = []
-        with torch.no_grad():
-            for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(train_loader):
-                x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
-
-                #emb = transformer.diff_x_proj(transformer.temporal_neural_operator(x0, grid).flatten(1,2))
-                #temporal_x = x0[...,1:] - x0[...,:-1]
-                if(config['coeff']):
-                    nu = coeffs['nu'].unsqueeze(-1)
-                    ax = coeffs['ax'].unsqueeze(-1)
-                    ay = coeffs['ay'].unsqueeze(-1)
-                    cx = coeffs['cx'].unsqueeze(-1)
-                    cy = coeffs['cy'].unsqueeze(-1)
-                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
-                    inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
-                else:
-                    inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
-                emb = transformer(inp, sentence_embeddings, False, True)
-
-                embs.append(emb)
-                all_coeffs.append(torch.vstack(list(coeffs.values())).transpose(0,1))
-
-        all_embs = torch.cat(embs, dim=0)
-        all_coeffs = torch.cat(all_coeffs, dim=0)
-        print(all_embs.shape)
-        print(all_coeffs.shape)
-        np.save("./{}/pretraining_embeddings_{}.npy".format(path, seed), all_embs.cpu().numpy())
-        np.save("./{}/pretraining_coeffs_{}.npy".format(path, seed), all_coeffs.cpu().numpy())
+        save_embeddings(config, path, transformer, train_loader, seed=seed, train=True)
+        save_embeddings(config, path, transformer, val_loader, seed=seed, train=False)
 
     return transformer
 
 
+def get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn):
+
+    # Select data for input and target
+    if(config['train_style'] == 'next_step'):
+        raise NotImplementedError("Need to implement next step.")
+    elif(config['train_style'] == 'fixed_future'):
+        y = x0[:, config['sim_time']].unsqueeze(-1)
+        x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
+
+    # Put data on correct device
+    x0 = x0.to(device).float()
+    y = y.to(device).float()
+    grid = grid.to(device).float()
+
+    if(config['coeff']): # Stack coefficients
+        nu = coeffs['nu'].unsqueeze(-1)
+        ax = coeffs['ax'].unsqueeze(-1)
+        ay = coeffs['ay'].unsqueeze(-1)
+        cx = coeffs['cx'].unsqueeze(-1)
+        cy = coeffs['cy'].unsqueeze(-1)
+        coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],
+                                                                                               x0.shape[2], 5)
+        inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+    else:
+        inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
+    #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
+    y_pred = transformer(inp, sentence_embeddings)
+
+    y = y.to(device=device)#.cuda()
+
+    # Compute the loss.
+    loss = loss_fn(y_pred, y)
+
+    return y_pred, y, loss
+
+
 def run_training(transformer, config, prefix):
-    #prefix = config['data_name'].split("_")[0]
-    path = "{}{}_{}/{}_vit".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
-    f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
+    path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
     model_name = 'vit' + "_{}.pt".format(seed)
     model_path = path + "/" + model_name
 
@@ -482,17 +539,13 @@ def run_training(transformer, config, prefix):
     print(f'Total parameters = {total_params}')
 
     # Get data as loaders
-    train_loader, val_loader, test_loader = new_get_data(f, config)
+    train_loader, val_loader, test_loader = new_get_data(config)
 
     ################################################################
     # training and evaluation
     ################################################################
 
-    if(config['return_text']):
-        #_data, _, _, _, _, _ = next(iter(val_loader))
-        _data, _, _, _ = next(iter(val_loader))
-    else:
-        _data, _, _ = next(iter(val_loader))
+    _data, _, _, _ = next(iter(val_loader))
     dimensions = len(_data.shape)
     print('Spatial Dimension', dimensions - 3)
 
@@ -516,48 +569,11 @@ def run_training(transformer, config, prefix):
     for epoch in tqdm(range(config['epochs'])):
         # Iterate over the training dataset.
         train_loss = 0
-        times = []
         max_val = 0
         transformer.train()
-        #for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(train_loader):
         for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(train_loader):
             start = time.time()
-
-            y = x0[:, config['sim_time']].unsqueeze(-1)
-            x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
-
-            # Put data on correct device
-            x0 = x0.to(device).float()
-            y = y.to(device).float()
-            #tokens = tokens.to(device).float()
-            #t = t.to(device).float()
-            grid = grid.to(device).float()
-
-            # Rearrange data
-            #if(not('electric' in config['data_name'])):
-            #    x0 = torch.swapaxes(x0, 1, 3)
-            #    x0 = torch.swapaxes(x0, 1, 2)
-
-            # Forward pass
-            #y_pred = transformer(grid, tokens, x0, t)
-            #y_pred = transformer(grid, None, x0, None, clip=False)
-            if(config['coeff']):
-                nu = coeffs['nu'].unsqueeze(-1)
-                ax = coeffs['ax'].unsqueeze(-1)
-                ay = coeffs['ay'].unsqueeze(-1)
-                cx = coeffs['cx'].unsqueeze(-1)
-                cy = coeffs['cy'].unsqueeze(-1)
-                coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
-                inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
-            else:
-                inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
-            #y_pred = transformer(torch.cat((x0, grid), dim=-1).permute(0,3,1,2), sentence_embeddings, True)
-            y_pred = transformer(inp, sentence_embeddings)
-
-            y = y.to(device=device)#.cuda()
-
-            # Compute the loss.
-            loss = loss_fn(y_pred, y)
+            y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn)
 
             # Backward pass: compute gradient of the loss with respect to model
             optimizer.zero_grad()
@@ -580,45 +596,14 @@ def run_training(transformer, config, prefix):
             transformer.eval()
             val_loss = 0
             all_val_preds = []
-            #for bn, (x0, y, grid, tokens, t, sentence_embeddings) in enumerate(val_loader):
             for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(val_loader):
                 # Forward pass: compute predictions by passing the input sequence
-                # through the transformer.
-                # Put data on correct device
-                y = x0[:, config['sim_time']].unsqueeze(-1)
-                x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
-                x0 = x0.to(device).float()
-                y = y.to(device).float()
-                #tokens = tokens.to(device).float()
-                #t = t.to(device).float()
-                grid = grid.to(device).float()
-
-                # Rearrange data
-                #if(not('electric' in config['data_name'])):
-                #    x0 = torch.swapaxes(x0, 1, 3)
-                #    x0 = torch.swapaxes(x0, 1, 2)
-
-                #y_pred = transformer(grid, tokens, x0, t)
-                #y_pred = transformer(grid, None, x0, None, clip=False)
-                if(config['coeff']):
-                    nu = coeffs['nu'].unsqueeze(-1)
-                    ax = coeffs['ax'].unsqueeze(-1)
-                    ay = coeffs['ay'].unsqueeze(-1)
-                    cx = coeffs['cx'].unsqueeze(-1)
-                    cy = coeffs['cy'].unsqueeze(-1)
-                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
-                    inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
-                else:
-                    inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
-                y_pred = transformer(inp, sentence_embeddings)
-                y = y.to(device=device)#.cuda()
+                y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn)
+                all_val_preds.append(y_pred.detach())
+                val_loss += loss_fn(y_pred, y).item()
                 if(bn == 0):
                     y_val_true = y.clone()
                     y_val_pred = y_pred.clone()
-                all_val_preds.append(y_pred.detach())
-
-                # Compute the loss.
-                val_loss += loss_fn(y_pred, y).item()
 
             if  val_loss < loss_val_min:
                 loss_val_min = val_loss
@@ -653,7 +638,7 @@ def run_training(transformer, config, prefix):
     test_value = evaluate(test_loader, transformer, loss_fn, config=config)
     test_vals.append(test_value)
     print("TEST VALUE BEST LAST EPOCH: {0:5f}".format(test_value))
-    np.save("{}{}_{}/{}_vit/test_vals_{}.npy".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix, seed), test_vals)
+    np.save("{}{}_{}/{}/test_vals_{}.npy".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix, seed), test_vals)
 
 
 if __name__ == '__main__':
@@ -667,26 +652,26 @@ if __name__ == '__main__':
 
     # Get arguments and get rid of unnecessary ones
     train_args = config['args']
-    prefix = train_args['data_name'].split("_")[0] + "_" + train_args['train_style'] + "_" + train_args['embedding']
+    prefix = "2D_vit_" + train_args['train_style'] + "_" + train_args['pretraining_loss'] + \
+             "_" + train_args['llm']
     prefix += "_coeff" if(train_args['coeff']) else ""
-    if('electric' in train_args['data_name']):
-        prefix = "electric_" + prefix
     train_args['prefix'] = prefix
-    os.makedirs("{}{}_{}/{}_vit".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'], prefix),
-                exist_ok=True)
+
+    # Creat save directory
+    os.makedirs("{}{}_{}/{}".format(train_args['results_dir'], train_args['num_samples'],
+                                        train_args['pretraining_num_samples'], prefix), exist_ok=True)
+
+    # Copy files to save directory
     shutil.copy("./configs/2d_vit_config.yaml",
-                "{}{}_{}/{}_vit/2d_vit_config.yaml".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'],
-                prefix))
-    shutil.copy("./plot_progress.py", "{}{}_{}/{}_vit/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'], 
-                prefix))
-    shutil.copy("./pretrain_plot_progress.py", "{}{}_{}/{}_vit/pretrain_plot_progress.py".format(train_args['results_dir'], train_args['num_samples'], train_args['pretraining_num_samples'],
-                prefix))
+                "{}{}_{}/{}/2d_vit_config.yaml".format(train_args['results_dir'], train_args['num_samples'],
+                                                           train_args['pretraining_num_samples'], prefix))
+    shutil.copy("./plot_progress.py", "{}{}_{}/{}/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'],
+                                                                               train_args['pretraining_num_samples'], prefix))
+    shutil.copy("./pretrain_plot_progress.py", "{}{}_{}/{}/pretrain_plot_progress.py".format(train_args['results_dir'],
+                             train_args['num_samples'], train_args['pretraining_num_samples'], prefix))
 
 
     for seed in range(train_args.pop('num_seeds')):
-    #for seed in [0,1]:
-    #for seed in [2,3]:
-    #for seed in [4]:
         print("\nSEED: {}\n".format(seed))
         torch.manual_seed(seed)
         np.random.seed(seed)

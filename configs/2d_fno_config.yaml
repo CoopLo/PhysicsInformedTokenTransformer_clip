@@ -1,12 +1,16 @@
 args:
     device: 'cuda:0'
     #results_dir: './clip_vit/'
-    results_dir: './pretrained_clip_comparison/'
+    #results_dir: './new_pretrained_fullgrad_clip_comparison/'
+    #results_dir: './again_again_new_test/'
+    #results_dir: './long_pretrain_weighted_fixed/'
+    results_dir: './tune_long_pretrain_weighted_fixed/'
+    #results_dir: './noise_long_pretrain_weighted_fixed/'
     #train_style: 'next_step'
     train_style: 'fixed_future'
     num_workers: 0
     batch_size: 32
-    pretraining_batch_size: 128
+    pretraining_batch_size: 256
     initial_step: 10
     #initial_step: 20
     #initial_step: 41
@@ -23,9 +27,10 @@ args:
     reduced_batch: 1
     #split_style: 'equation' # 'initial_condition' or 'equation'
     split_style: 'initial_condition' # 'initial_condition' or 'equation'
-    #embedding: 'None'
-    embedding: 'clip'
+    embedding: 'None'
+    #embedding: 'clip'
     #embedding: 'llm'
+    #embedding: 'oformerllm'
     llm: 'all-MiniLM-L6-v2'
     #llm: 'all-mpnet-base-v2'
     coeff: True
@@ -34,21 +39,22 @@ args:
     # CLIP
     embed_dim: 32
     downsample: 2
+    detach: False
 
     # Optimizer
     learning_rate: 1.e-3
     weight_decay: 1.e-4
-    scheduler_step: 50
+    scheduler_step: 20
     scheduler_gamma: 0.5
-    #epochs: 5
-    #epochs: 10
     epochs: 500
-    num_seeds: 5
+    #epochs: 10
+    #epochs: 500
+    num_seeds: 1
 
-    pretraining_learning_rate: 1.e-3
-    pretraining_weight_decay: 1.e-4
+    pretraining_learning_rate: 1.e-4
+    pretraining_weight_decay: 1.e-8
     #pretraining_epochs: 1000
-    pretraining_epochs: 100
+    pretraining_epochs: 200
 
     # Sim samples
     im_size: 32
@@ -66,6 +72,7 @@ args:
     num_samples: 100
     #num_samples: 500
     #num_samples: 1000
+    #num_samples: 2000
     pretraining_num_samples: 10
 
     samples_per_equation: 1
@@ -76,8 +83,10 @@ args:
     modes1: 4
     modes2: 4
     width: 32
-    dropout: 0.2
+    #dropout: 0.001
+    dropout: 0.01
+    #dropout: 0.1
 
     # Tracking
-    log_freq: 1000
-    progress_plot_freq: 1000
+    log_freq: 10
+    progress_plot_freq: 50

@@ -289,6 +289,7 @@ def new_get_data(f, config, pretraining=False):
     train_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_train_large.h5",
             pde="Heat, Burgers, Advection",
+            subset=config['data_name'],
             mode="train",
             resolution=[50,64,64],
             augmentation=[],
@@ -296,14 +297,16 @@ def new_get_data(f, config, pretraining=False):
             shift='None',
             load_all=False,
             device='cuda:0',
-            num_samples=config['num_samples'],
-            clip=config['embedding'] == 'clip',
-            downsample=config['downsample'],
+            clip='clip' in config['embedding'],
+            spatial_downsampling=config['downsample'],
             llm=config['llm'],
+            num_samples=config['num_samples'],
+            temporal_horizon=config['sim_time'],
     )
     val_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_valid_large.h5",
             pde="Heat, Burgers, Advection",
+            subset=config['data_name'],
             mode="valid",
             resolution=[50,64,64],
             augmentation=[],
@@ -313,12 +316,14 @@ def new_get_data(f, config, pretraining=False):
             device='cuda:0',
             num_samples=config['num_samples'],
             clip=config['embedding'] == 'clip',
-            downsample=config['downsample'],
+            spatial_downsampling=config['downsample'],
             llm=config['llm'],
+            temporal_horizon=config['sim_time'],
     )
     test_data = PDEDataset2D(
             path="/home/cooperlorsung/2d_heat_adv_burgers_test_large.h5",
             pde="Heat, Burgers, Advection",
+            subset=config['data_name'],
             mode="test",
             resolution=[50,64,64],
             augmentation=[],
@@ -328,8 +333,9 @@ def new_get_data(f, config, pretraining=False):
             device='cuda:0',
             num_samples=config['num_samples'],
             clip=config['embedding'] == 'clip',
-            downsample=config['downsample'],
+            spatial_downsampling=config['downsample'],
             llm=config['llm'],
+            temporal_horizon=config['sim_time'],
     )
     batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
@@ -343,19 +349,27 @@ def new_get_data(f, config, pretraining=False):
 
 
 def evaluate(test_loader, model, loss_fn, navier_stokes=True, config=None):
+    # Use this to select initial step and also coefficients
+    mask = [False]*(config['sim_time']+5)
+    mask[:config['initial_step']] = [True]*config['initial_step']
+    mask[-5:] = [True]*5
+    mask = torch.Tensor(mask).bool()
     test_l2_step = 0
     test_l2_full = 0
     with torch.no_grad():
         model.eval()
         #for bn, (xx, yy, grid, tokens, t) in enumerate(test_loader):
-        for bn, (xx, grid, coeffs) in enumerate(test_loader):
+        for bn, (xx, grid) in enumerate(test_loader):
             if(config['train_style'] == 'next_step'):
                 random_step = random.randint(config['initial_step'], config['sim_time'])
                 yy = xx[:, random_step].unsqueeze(-1).to(device).float()
                 xx = xx[:, random_step-config['initial_step']:random_step].permute(0,2,3,1).to(device).float()
             else:
-                yy = xx[:, config['sim_time']].unsqueeze(-1).to(device).float()
-                xx = xx[:, :config['initial_step']].permute(0, 2, 3, 1).to(device).float()
+                #yy = xx[:, config['sim_time']].unsqueeze(-1).to(device).float()
+                #xx = xx[:, :config['initial_step']].permute(0, 2, 3, 1).to(device).float()
+                yy = xx[:, config['sim_time']-1].unsqueeze(-1)
+                xx = xx[:,mask].permute(0,2,3,1)
+                grid = grid.permute(0,2,3,1)
             #xx = xx.to(device).float()
             #yy = yy.to(device).float()
             grid = grid.to(device).float()
@@ -367,17 +381,17 @@ def evaluate(test_loader, model, loss_fn, navier_stokes=True, config=None):
                 #else:
                 #    x = xx
                 #im, loss = model.get_loss(x, yy[...,0], grid, loss_fn)
-                if(config['coeff']):
-                    nu = coeffs['nu'].unsqueeze(-1)
-                    ax = coeffs['ax'].unsqueeze(-1)
-                    ay = coeffs['ay'].unsqueeze(-1)
-                    cx = coeffs['cx'].unsqueeze(-1)
-                    cy = coeffs['cy'].unsqueeze(-1)
-                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1],     xx.shape[2], 5)
-                    inp = torch.cat((xx, coeff), dim=-1)
-                else:
-                    inp = xx
-                im, loss = model.get_loss(inp, yy[...,0], grid, loss_fn)
+                #if(config['coeff']):
+                #    nu = coeffs['nu'].unsqueeze(-1)
+                #    ax = coeffs['ax'].unsqueeze(-1)
+                #    ay = coeffs['ay'].unsqueeze(-1)
+                #    cx = coeffs['cx'].unsqueeze(-1)
+                #    cy = coeffs['cy'].unsqueeze(-1)
+                #    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1],     xx.shape[2], 5)
+                #    inp = torch.cat((xx, coeff), dim=-1)
+                #else:
+                #    inp = xx
+                im, loss = model.get_loss(xx, yy[...,0], grid, loss_fn)
 
             elif(isinstance(model, DeepONet2D)):
                 #if(navier_stokes):
@@ -416,7 +430,8 @@ def run_training(model, config, prefix):
     
     #prefix = config['data_name'].split("_")[0]
     path = "{}{}/{}_{}".format(config['results_dir'], config['num_samples'], config['model_name'], prefix)
-    f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
+    #f = h5py.File("{}/{}".format(config['base_path'], config['data_name']), 'r')
+    f = None
     model_name = '{}'.format(config['model_name']) + "_{}.pt".format(seed)
     model_path = path + "/" + model_name
     navier_stokes = not('electric' in config['data_name'])
@@ -436,7 +451,7 @@ def run_training(model, config, prefix):
     
     if(config['return_text']):
         #_data, _, _, _, _ = next(iter(val_loader))
-        _data, _, _, = next(iter(val_loader))
+        _data, _, = next(iter(val_loader))
     else:
         _data, _, _ = next(iter(val_loader))
     dimensions = len(_data.shape)
@@ -473,6 +488,11 @@ def run_training(model, config, prefix):
     #                
     #    start_epoch = checkpoint['epoch']
     #    loss_val_min = checkpoint['loss']
+    # Use this to select initial step and also coefficients
+    mask = [False]*(config['sim_time']+5)
+    mask[:config['initial_step']] = [True]*config['initial_step']
+    mask[-5:] = [True]*5
+    mask = torch.Tensor(mask).bool()
     
     train_l2s, val_l2s = [], []
     for ep in tqdm(range(start_epoch, config['epochs'])):
@@ -481,7 +501,7 @@ def run_training(model, config, prefix):
         train_l2_step = 0
         train_l2_full = 0
         #for bn, (xx, yy, grid, tokens, t) in enumerate(train_loader):
-        for bn, (xx, grid, coeffs) in enumerate(train_loader):
+        for bn, (xx, grid) in enumerate(train_loader):
             
             # Put data on correct device
             if(config['train_style'] == 'next_step'):
@@ -489,30 +509,16 @@ def run_training(model, config, prefix):
                 yy = xx[:, random_step].unsqueeze(-1).to(device).float()
                 xx = xx[:, random_step-config['initial_step']:random_step].permute(0,2,3,1).to(device).float()
             else:
-                yy = xx[:, config['sim_time']].unsqueeze(-1).to(device).float()
-                xx = xx[:, :config['initial_step']].permute(0, 2, 3, 1).to(device).float()
+                yy = xx[:, config['sim_time']-1].unsqueeze(-1)
+                xx = xx[:,mask].permute(0,2,3,1)
+                grid = grid.permute(0,2,3,1)
             #xx = xx.to(device).float()
             #yy = yy.to(device).float()
             grid = grid.to(device).float()
             
             # Each model handles input differnetly
             if(isinstance(model, (FNO2d, OFormer2D))):
-                #if(navier_stokes):
-                #    x = torch.swapaxes(xx, 1, 3)
-                #    x = torch.swapaxes(x, 1, 2)
-                #else:
-                #    x = xx
-                if(config['coeff']):
-                    nu = coeffs['nu'].unsqueeze(-1)
-                    ax = coeffs['ax'].unsqueeze(-1)
-                    ay = coeffs['ay'].unsqueeze(-1)
-                    cx = coeffs['cx'].unsqueeze(-1)
-                    cy = coeffs['cy'].unsqueeze(-1)
-                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1],     xx.shape[2], 5)
-                    inp = torch.cat((xx, coeff), dim=-1)
-                else:
-                    inp = xx
-                im, loss = model.get_loss(inp, yy[...,0], grid, loss_fn)
+                im, loss = model.get_loss(xx, yy[...,0], grid, loss_fn)
 
                 #im, loss = model.get_loss(x, yy[...,0], grid, loss_fn)
             elif(isinstance(model, DeepONet2D)):
@@ -563,7 +569,7 @@ def run_training(model, config, prefix):
             model.eval()
             with torch.no_grad():
                 #for bn, (xx, yy, grid, tokens, t) in enumerate(val_loader):
-                for bn, (xx, grid, coeffs) in enumerate(val_loader):
+                for bn, (xx, grid) in enumerate(val_loader):
 
                     # Put data on correct device
                     if(config['train_style'] == 'next_step'):
@@ -571,31 +577,14 @@ def run_training(model, config, prefix):
                         yy = xx[:, random_step].unsqueeze(-1).to(device).float()
                         xx = xx[:, random_step-config['initial_step']:random_step].permute(0,2,3,1).to(device).float()
                     else:
-                        yy = xx[:, config['sim_time']].unsqueeze(-1).to(device).float()
-                        xx = xx[:, :config['initial_step']].permute(0, 2, 3, 1).to(device).float()
-                    #xx = xx.to(device).float()
-                    #yy = yy.to(device).float()
+                        yy = xx[:, config['sim_time']-1].unsqueeze(-1)
+                        xx = xx[:,mask].permute(0,2,3,1)
+                        grid = grid.permute(0,2,3,1)
                     grid = grid.to(device).float()
                     
                     # Each model handles input differnetly
                     if(isinstance(model, (FNO2d, OFormer2D))):
-                        #if(navier_stokes):
-                        #    x = torch.swapaxes(xx, 1, 3)
-                        #    x = torch.swapaxes(x, 1, 2)
-                        #else:
-                        #    x = xx
-                        #im, loss = model.get_loss(x, yy[...,0], grid, loss_fn)
-                        if(config['coeff']):
-                            nu = coeffs['nu'].unsqueeze(-1)
-                            ax = coeffs['ax'].unsqueeze(-1)
-                            ay = coeffs['ay'].unsqueeze(-1)
-                            cx = coeffs['cx'].unsqueeze(-1)
-                            cy = coeffs['cy'].unsqueeze(-1)
-                            coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(xx.shape[0], xx.shape[1],     xx.shape[2], 5)
-                            inp = torch.cat((xx, coeff), dim=-1)
-                        else:
-                            inp = xx
-                        im, loss = model.get_loss(inp, yy[...,0], grid, loss_fn)
+                        im, loss = model.get_loss(xx, yy[...,0], grid, loss_fn)
 
                     elif(isinstance(model, DeepONet2D)):
                         #if(navier_stokes):
@@ -685,32 +674,33 @@ if __name__ == "__main__":
         print("\nModel must be one of: fno, deeponet, or oformer. Model selected was: {}\n".format(model_name))
         raise
 
-    # Load config
-    with open("./configs/2d_{}_config.yaml".format(model_name), 'r') as stream:
-        config = yaml.safe_load(stream)
-
-    # Get arguments and get rid of unnecessary ones
-    train_args = config['args']
-    train_args['model_name'] = model_name
-    device = train_args['device']#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    prefix = train_args['data_name'].split("_")[0] + "_" + train_args['train_style']
-    prefix += '_{}'.format(train_args['llm']) if(train_args['llm'] != None) else ''
-    prefix += '_coeff' if(train_args['coeff']) else ''
-    if('electric' in train_args['data_name']):
-        prefix = 'electric_' + prefix
-    os.makedirs("{}{}/{}_{}".format(train_args['results_dir'], train_args['num_samples'], model_name, prefix), exist_ok=True)
-    shutil.copy("./configs/2d_{}_config.yaml".format(model_name),
-                "{}{}/{}_{}/2d_{}_config.yaml".format(train_args['results_dir'], train_args['num_samples'], model_name, prefix, model_name))
-    shutil.copy("./plot_progress.py", "{}{}/{}_{}/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'], model_name, prefix))
-
-
-    for seed in range(train_args.pop('num_seeds')):
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        train_args['seed'] = seed
-
-        model = get_model(model_name, train_args)
-        run_training(model, train_args, prefix)
-    print("Done.")
-
+    for ds in ['heat,adv,burger', 'heat', 'burger', 'adv']:
+        # Load config
+        with open("./configs/2d_{}_config.yaml".format(model_name), 'r') as stream:
+            config = yaml.safe_load(stream)
+    
+        # Get arguments and get rid of unnecessary ones
+        train_args = config['args']
+        train_args['data_name'] = ds
+        train_args['model_name'] = model_name
+        device = train_args['device']#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        prefix = train_args['data_name'].split("_")[0] + "_" + train_args['train_style']
+        prefix += '_{}'.format(train_args['llm']) if(train_args['llm'] != None) else ''
+        prefix += '_coeff' if(train_args['coeff']) else ''
+        #if('electric' in train_args['data_name']):
+        #    prefix = 'electric_' + prefix
+        os.makedirs("{}{}/{}_{}".format(train_args['results_dir'], train_args['num_samples'], model_name, prefix), exist_ok=True)
+        shutil.copy("./configs/2d_{}_config.yaml".format(model_name),
+                    "{}{}/{}_{}/2d_{}_config.yaml".format(train_args['results_dir'], train_args['num_samples'], model_name, prefix, model_name))
+        shutil.copy("./plot_progress.py", "{}{}/{}_{}/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'], model_name, prefix))
+    
+    
+        for seed in range(train_args.pop('num_seeds')):
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            train_args['seed'] = seed
+    
+            model = get_model(model_name, train_args)
+            run_training(model, train_args, prefix)
+        print("Done.")
 
