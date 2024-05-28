@@ -110,8 +110,10 @@ class VisionTransformer(nn.Module):
 
 
     def forward(self, x):
+        #print(x.shape)
         B = x.shape[0]
         x = self.patch_embed(x)
+        #print(x.shape)
 
         cls_token = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_token, x), dim=1)
@@ -139,8 +141,11 @@ class CLIPVisionTransformer(nn.Module):
                  mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0., llm=None):
         super().__init__()
         self.patch_embed = PatchEmbed(img_size, patch_size, stride, in_chans, embed_dim)
+
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
         self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.n_patches + 1, embed_dim))
+
         self.pos_drop = nn.Dropout(p=drop_rate)
         self.out_chans = out_chans
         self.patch_size = patch_size
@@ -187,16 +192,19 @@ class CLIPVisionTransformer(nn.Module):
         x = x + self.pos_embed
 
         sentence_emb = self.sentence_proj(sentence_embeddings)
-        token_emb = self.x_proj(x.flatten(1,2))
-        if(return_embedding):
-            cross_corr = token_emb @ sentence_emb.T
-            return torch.cat((sentence_emb.unsqueeze(-1), token_emb.unsqueeze(-1)), dim=-1), cross_corr
+        sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
 
+        x_emb = self.x_proj(x.flatten(1,2))
+        x_emb = F.normalize(x_emb, p=2, dim=-1)
+
+        if(return_embedding):
+            cross_corr = x_emb @ sentence_emb.T
+            return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1), cross_corr
         if(clip):
-            cross_corr = token_emb @ sentence_emb.T
+            cross_corr = x_emb @ sentence_emb.T
             return cross_corr
         else:
-            embedding = torch.cat((token_emb, sentence_emb), dim=-1).unsqueeze(1).detach()
+            embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1).detach()
             x = torch.cat((x, embedding), dim=1)
 
         x = self.pos_drop(x)

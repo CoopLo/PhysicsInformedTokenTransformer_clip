@@ -147,7 +147,9 @@ class PDEDataset2D(Dataset):
                  llm: str=None,
                  sentence: bool=False,
                  downsample: int=1,
-                 debug: bool=False) -> None:
+                 debug: bool=False,
+                 subset: str='heat,adv,burger',
+                 ) -> None:
         """Initialize the dataset object
         Args:
             path: path to dataset
@@ -169,46 +171,41 @@ class PDEDataset2D(Dataset):
         self.resolution = (100, 64, 64) if resolution is None else resolution
         self.llm = llm
         self.debug = debug
+        self.subset = subset
+        self.device = device
         self.data = f[self.mode]
 
         if(mode == 'train'):
             self.num_samples = len(self.data["u"])+2 if(num_samples == -1) else num_samples
         else:
             self.num_samples = 50 if(self.debug) else 768 # Use entire validation set
+        #idxs = torch.randperm(self.data["u"].shape[0])[:self.num_samples].cpu().numpy()
 
-        idxs = torch.randperm(self.data["u"].shape[0])[:self.num_samples].cpu().numpy()
+        # Get data
+        #self.u = self.data["u"][:][idxs][...,::self.downsample, ::self.downsample]
+        self.u = torch.Tensor(self.data["u"][:][...,::self.downsample, ::self.downsample]).to(self.device)
+        
+        # Get coefficients
+        #self.nu = torch.Tensor(self.data["nu"][:][idxs])
+        #self.ax = torch.Tensor(self.data["ax"][:][idxs])
+        #self.ay = torch.Tensor(self.data["ay"][:][idxs])
+        #self.cx = torch.Tensor(self.data["cx"][:][idxs])
+        #self.cy = torch.Tensor(self.data["cy"][:][idxs])
+        self.nu = torch.Tensor(self.data["nu"][:]).to(self.device)
+        self.ax = torch.Tensor(self.data["ax"][:]).to(self.device)
+        self.ay = torch.Tensor(self.data["ay"][:]).to(self.device)
+        self.cx = torch.Tensor(self.data["cx"][:]).to(self.device)
+        self.cy = torch.Tensor(self.data["cy"][:]).to(self.device)
 
-        self.u = self.data["u"][:][idxs][...,::self.downsample, ::self.downsample]
-        self.length = len(self.u)
-        self.nu = torch.Tensor(self.data["nu"][:][idxs])
-        self.ax = torch.Tensor(self.data["ax"][:][idxs])
-        self.ay = torch.Tensor(self.data["ay"][:][idxs])
-        self.cx = torch.Tensor(self.data["cx"][:][idxs])
-        self.cy = torch.Tensor(self.data["cy"][:][idxs])
+        # Choose subset of data
+        self.total_samples = len(self.u)
+        self.choose_subset(self.subset, n=num_samples)
 
-        #print()
-        #print("NU: {}\t{}".format(self.nu.max(), self.nu.min()))
-        #print("AX: {}\t{}".format(self.ax.max(), self.ax.min()))
-        #print("AY: {}\t{}".format(self.ay.max(), self.ay.min()))
-        #print("CX: {}\t{}".format(self.cx.max(), self.cx.min()))
-        #print("CY: {}\t{}".format(self.cy.max(), self.cy.min()))
-        #print()
-        #raise
+        # Get grid and time info
+        self.x = torch.tensor(np.array(self.data["x"][:]))[...,::self.downsample, ::self.downsample].to(self.device)
+        self.t = torch.tensor(np.array(self.data["t"][:])).to(self.device)
 
-        self.x = torch.tensor(np.array(self.data["x"][:]))[...,::self.downsample, ::self.downsample]
-        self.t = torch.tensor(np.array(self.data["t"][:]))
-
-        #self.u = self.data["u"][:self.num_samples]
-        #self.length = len(self.u)
-        #self.nu = self.data["nu"][:self.num_samples]
-        #self.ax = self.data["ax"][:self.num_samples]
-        #self.ay = self.data["ay"][:self.num_samples]
-        #self.cx = self.data["cx"][:self.num_samples]
-        #self.cy = self.data["cy"][:self.num_samples]
-
-        #self.x = torch.tensor(np.array(self.data["x"][:self.num_samples]))
-        #self.t = torch.tensor(np.array(self.data["t"][:self.num_samples]))
-
+        # Get potentially useful variables from space and time
         self.tmin = self.t[0]
         self.tmax = self.t[-1]
         self.nt = len(self.t)
@@ -241,7 +238,8 @@ class PDEDataset2D(Dataset):
             self.sentence_embeddings = []
             self.sentences = []
             print("Getting sentence embeddings...")
-            for idx in tqdm(range(self.u.shape[0])):
+            #for idx in tqdm(range(self.u.shape[0])):
+            for idx in tqdm(self.indexes):
                 # Burgers
                 if(self.nu[idx] != 0 and self.cx[idx] != 0 and self.cy[idx] != 0):
                     ratio = ((self.cx[idx] + self.cy[idx])**2)**(0.5)/self.nu[idx]
@@ -253,7 +251,7 @@ class PDEDataset2D(Dataset):
                     cls = 'strongly' if(ratio > 100) else 'weakly'
                     sim = ' not ' if(ratio > 100) else ' '
                     sentence += ' This system is {} advection dominanted and does{}behave similarly to heat equation.'.format(cls, sim)
-                    sentence += ' The predicted state should look like the input but shifted in space.'
+                    sentence += ' Ths predicted state should have shocks.' if(cls == 'strongly') else ' The predicted state should look smoother than the inputs'
                 # Advection
                 elif(self.ax[idx] != 0 and self.ay[idx] != 0):
                     adv = ((self.ax[idx] + self.ay[idx])**2)**(0.5)
@@ -264,7 +262,7 @@ class PDEDataset2D(Dataset):
 
                     cls = 'strongly' if(adv > 2) else 'weakly'
                     sentence += ' This system is {} advective.'.format(cls)
-                    sentence += ' Ths predicted state should have shocks.' if(cls == 'strongly') else ' The predicted state should look smoother than the inputs'
+                    sentence += ' The predicted state should look like the input but shifted in space.'
                 # Heat
                 elif(self.nu[idx] != 0 and self.cx[idx] == 0 and self.cy[idx] == 0):
                     sentence = 'The Heat equation models how a quantity such as heat diffuses through a given region.'
@@ -275,11 +273,15 @@ class PDEDataset2D(Dataset):
                     sentence += ' This system is {} diffusive.'.format(cls)
                     sentence += ' The predicted state should look smoother than the inputs.'
 
+                sentence += " Theis system have periodic boundary conditions."
                 sentence += " Give me an embedding that is useful for numerically predicting the target state."
                 if(self.sentence):
                     while(len(sentence) < 650): # Pad them to have same length
                         sentence += ' '
+                    #while(len(sentence) < 400): # Pad them to have same length
+                    #    sentence += ' '
                     if(len(sentence) > 650):
+                    #if(len(sentence) > 400):
                         print(len(sentence))
                         raise
                     self.sentences.append(sentence)
@@ -288,8 +290,18 @@ class PDEDataset2D(Dataset):
                     self.sentence_embeddings.append(self.sentence_embedder.encode(sentence))
             print("Done.")
 
+        # Something is wrong here.
+        #from matplotlib import pyplot as plt
+        #for index in tqdm(self.indexes):
+        #    fig, ax = plt.subplots(ncols=2, figsize=(15,8))
+        #    ax[0].imshow(self.u[index][0].cpu())
+        #    ax[1].imshow(self.u[index][31].cpu())
+        #    plt.savefig("./image_test/{}.png".format(index))
+        #    plt.close()
+        #raise
+
     def __len__(self):
-        return self.length
+        return len(self.indexes)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, torch.Tensor]:
         """
@@ -302,8 +314,13 @@ class PDEDataset2D(Dataset):
             torch.Tensor: spatial coordinates
             list: equation specific parameters
         """
+        #u = self.u[idx]
+        #x = self.x
+        original_idx = idx
+        idx = self.indexes[idx]
         u = self.u[idx]
         x = self.x
+        t = self.t
         
         variables = {}
         variables['nu'] = self.nu[idx] 
@@ -320,11 +337,12 @@ class PDEDataset2D(Dataset):
                 u = self.augmentation(u, pde, self.shift)
 
         if(self.clip):
-            return u, x.permute(1,2,0), variables, self.sentence_embeddings[idx]
+            return u, x.permute(1,2,0), variables, self.sentence_embeddings[original_idx]
         elif(self.sentence):
-            return u, x.permute(1,2,0), variables, self.sentences[idx]
+            return u, x.permute(1,2,0), variables, self.sentences[original_idx]
         else:
-            return u, x.permute(1,2,0), variables, self.sentence_embeddings[idx]
+            #return u, x.permute(1,2,0), variables, self.sentence_embeddings[original_idx] ???
+            return u, x.permute(1,2,0), variables
     
 
     def get_PDE(self, variables):
@@ -336,3 +354,114 @@ class PDEDataset2D(Dataset):
             return "heat"
         else:
             raise ValueError("PDE not found")
+
+
+    def choose_subset(
+            self,
+            chosen: str = 'heat,adv,burger',
+            reverse: bool = False,
+            n: int = None,
+            ):
+        """
+        Choose subset of the dataset
+        Args:
+            chosen: str 
+                stringof chosen PDEs and subset of PDE coefficients.
+                DO NOT USE ANY SPACES!
+                Example:
+                    'heat,nu>0.5,adv,ax<0.4,burger,cx<0.3'
+
+                Ranges:
+                    nu:
+                        - burgers: [7.5e-3, 1.5e-2]
+                        - heat: [3e-3, 2e-2]
+                    ax, ay: [0.1, 2.5]
+                    cx, cy: [0.5, 1.0]
+
+                    
+            reverse: bool.
+                if True, choose all PDEs except the specified ones
+            n: int or None
+                number of samples to use from the specified subset
+            seed: int
+                random seed when choosing n samples (for reproducibility)
+        Returns:
+            None
+        """
+        gs = chosen.split(',')
+
+        if 'adv' in gs:
+            adv = ((self.ax!=0) | (self.ay!=0)) & ((self.cx==0) & (self.cy==0)) & (self.nu==0)
+        else:
+            adv = torch.zeros(self.total_samples).bool()
+
+        if 'burger' in gs:
+            burger =((self.ax==0) & (self.ay==0)) & ((self.cx!=0) | (self.cy!=0)) & (self.nu!=0)
+        else:
+            burger = torch.zeros(self.total_samples).bool()
+
+        if 'heat' in gs:
+            heat = ((self.ax==0) & (self.ay==0)) & ((self.cx==0) & (self.cy==0)) & (self.nu!=0)
+        else:
+            heat = torch.zeros(self.total_samples).bool()
+
+        if 'ns' in gs:
+            ns = (self.visc != 0) & (self.amp != 0)
+        else:
+            ns = torch.zeros(self.total_samples).bool()
+
+        for g in gs:
+            if '>' in g:
+                attr, val = g.split('>')
+                if attr in ['ax', 'ay']:
+                    adv = adv & (getattr(self, attr)>float(val))
+                elif attr in ['cx', 'cy']:
+                    burger = burger & (getattr(self, attr)>float(val))
+                elif attr in ['nu']:
+                    burger = burger & (getattr(self, attr)>float(val))
+                    heat = heat & (getattr(self, attr)>float(val))
+            elif '<' in g:
+                attr, val = g.split('<')
+                if attr in ['ax', 'ay']:
+                    adv = adv & (getattr(self, attr)<float(val))
+                elif attr in ['cx', 'cy']:
+                    burger = burger & (getattr(self, attr)<float(val))
+                elif attr in ['nu']:
+                    burger = burger & (getattr(self, attr)<float(val))
+                    heat = heat & (getattr(self, attr)<float(val))
+
+        which = heat.to(self.device) | adv.to(self.device) | burger.to(self.device) | ns.to(self.device)
+        if reverse:
+            which = ~which
+
+        self.indexes = torch.arange(self.total_samples, device=which.device)[which]
+
+        if type(n) is int:
+            if n > len(self.indexes):
+                print(f"You want {n} samples but there are only {len(self.indexes)} available. Overriding {n} to {len(self.indexes)}")
+                self.num_samples = len(self.indexes)
+                n = len(self.indexes)
+
+            self.indexes = self.indexes[np.random.choice(len(self.indexes), n, replace=False)]
+
+        # Check number of equations
+        eq_dict = {"heat": 0, "adv": 0, "burgers": 0}
+        for idx in self.indexes:
+            eq = self.get_eq(idx)
+            eq_dict[eq] += 1
+
+        print(eq_dict)
+
+
+    def get_eq(self, idx):
+        nu = self.nu[idx]
+        cx = self.cx[idx]
+
+        if nu == 0:
+            return "adv"
+        if cx == 0:
+            return "heat"
+        else:
+            return "burgers"
+
+

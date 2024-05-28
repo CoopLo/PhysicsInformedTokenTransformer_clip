@@ -1,25 +1,25 @@
 args:
     device: 'cuda:0'
-    train_style: 'next_step' # 'fixed_future', 'rollout'
-    results_dir: './first_vit_results/'
+    results_dir: './again_l1_fixed_vit_results/'
     base_path: '/home/cooperlorsung/'
     pretrained_model_path: "./PRETRAINED_VITS/"
-    load_pretrained: False
+    load_pretrained: True
 
     #train_style: 'next_step'
     train_style: 'fixed_future'
     clip: True
     coeff: True
-    pretraining_loss: 'clip' # Or weightedclip or None
+    pretraining_loss: 'weightedclip' # Or weightedclip or None
     llm: 'all-MiniLM-L6-v2'
     #llm: 'all-mpnet-base-v2'
 
     num_workers: 0
-    batch_size: 64
-    pretraining_batch_size: 256
-    #pretraining_batch_size: 512
-    initial_step: 10
-    #initial_step: 1
+    batch_size: 32
+    #pretraining_batch_size: 64
+    #pretraining_batch_size: 256
+    pretraining_batch_size: 512
+    #initial_step: 10
+    initial_step: 5
 
     t_train: 200
     validate: 1
@@ -29,8 +29,10 @@ args:
     reduced_batch: 1
 
     # Optimizer
-    learning_rate: 1.e-3
-    weight_decay: 1.e-5
+    #num_samples: 100
+    num_samples: 500
+    learning_rate: 1.e-2
+    weight_decay: 1.e-7
     scheduler_step: 100
     scheduler_gamma: 0.5
     #epochs: 1000
@@ -39,36 +41,36 @@ args:
     num_seeds: 5
 
     # Pretraining optimizer
+    #pretraining_num_samples: 0
+    pretraining_num_samples: 10000
     pretraining_epochs: 500
-    pretraining_learning_rate: 1.e-4
+    pretraining_learning_rate: 1.e-3
     pretraining_weight_decay: 1.e-6
     pretraining_training_type: single
 
     # ViT Parameters
-    downsample: 2
+    downsample: 1
     img_size: 32
     patch_size: 16
-    patch_stride: 2 # Works if stride >= patch_size/2? Not exactly sure...
+    patch_stride: 8 # Works if stride >= patch_size/2? Not exactly sure...
     embed_dim: 32
-    depth: 5
+    depth: 1
     n_heads: 8
     mlp_ratio: 2
     qkv_bias: True
-    drop_rate: 0.1
-    attn_drop_rate: 0.1
+    drop_rate: 0.01
+    attn_drop_rate: 0.01
 
     #num_x: 64
     #num_y: 64
     #num_x: 60
     #num_y: 100
     
-    sim_time: 80
+    sim_time: 31
     
-    num_samples: 500
 
     # Set to 0 to skip pretraining
     #pretraining_num_samples: 0
-    pretraining_num_samples: 10000
     samples_per_equation: 1
 
     # Tracking

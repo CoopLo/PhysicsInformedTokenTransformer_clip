@@ -20,6 +20,7 @@ from models.pitt import PhysicsInformedTokenTransformer2D
 from models.pitt import CLIPPhysicsInformedTokenTransformer2D
 from models.pitt import CLIPTransformer2D
 from models.vit import CLIPVisionTransformer
+from models.lucidrains_vit import CLIPViT
 
 from models.oformer import OFormer2D, SpatialTemporalEncoder2D, STDecoder2D, PointWiseDecoder2D
 from models.deeponet import DeepONet2D
@@ -261,21 +262,37 @@ def get_transformer(model_name, config):
     #                                    latent_dim=config['latent_dim']).to(device=device)
     if(model_name == 'vit'):
         print("USING CLIP VISION TRANSFORMER\n")
-        transformer = CLIPVisionTransformer(
-                   img_size=config['img_size'],
+        #transformer = CLIPVisionTransformer(
+        #           img_size=config['img_size'],
+        #           patch_size=config['patch_size'],
+        #           in_chans=config['initial_step']+7 if(config['coeff']) else config['initial_step']+2,
+        #           out_chans=1,
+        #           embed_dim=config['embed_dim'],
+        #           depth=config['depth'],
+        #           n_heads=config['n_heads'],
+        #           mlp_ratio=config['mlp_ratio'],
+        #           qkv_bias=config['qkv_bias'],
+        #           drop_rate=config['drop_rate'],
+        #           attn_drop_rate=config['attn_drop_rate'],
+        #           stride=config['patch_stride'],
+        #           llm=config['llm'],
+        #).to(device)
+        transformer = CLIPViT(
+                   image_size=config['img_size'],
                    patch_size=config['patch_size'],
-                   in_chans=config['initial_step']+7 if(config['coeff']) else config['initial_step']+2,
-                   out_chans=1,
-                   embed_dim=config['embed_dim'],
+                   #num_classes=1,
+                   dim=config['dim'],
                    depth=config['depth'],
-                   n_heads=config['n_heads'],
-                   mlp_ratio=config['mlp_ratio'],
-                   qkv_bias=config['qkv_bias'],
-                   drop_rate=config['drop_rate'],
-                   attn_drop_rate=config['attn_drop_rate'],
-                   stride=config['patch_stride'],
+                   heads=config['heads'],
+                   mlp_dim=config['mlp_dim'],
+                   pool=config['pool'],
+                   channels=config['initial_step'] + 2 + 5,
+                   dim_head=config['dim_head'],
+                   dropout=config['dropout'],
+                   emb_dropout=config['emb_dropout'],
                    llm=config['llm'],
         ).to(device)
+
 
     else:
         raise ValueError("Invalid model choice.")
@@ -396,8 +413,8 @@ def save_embeddings(config, path, transformer, loader, train=True, seed=0):
 
 def run_pretraining(config, prefix):
     path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
-    pretrained_path = "{}{}_{}/{}".format(config['pretrained_model_path'], config['num_samples'],
-                                          config['pretraining_num_samples'], prefix)
+    pretrained_path = "{}{}/{}".format(config['pretrained_model_path'], config['pretraining_num_samples'],
+                                       prefix)
 
     model_name = 'pretraining' + "_{}.pt".format(seed)
     model_path = path + "/" + model_name
@@ -681,7 +698,7 @@ if __name__ == '__main__':
 
     # Load config
     #raise
-    with open("./configs/2d_vit_config.yaml", 'r') as stream:
+    with open("./configs/lucidrains_2d_vit_config.yaml", 'r') as stream:
         config = yaml.safe_load(stream)
 
     # Get arguments and get rid of unnecessary ones
@@ -696,8 +713,8 @@ if __name__ == '__main__':
                                         train_args['pretraining_num_samples'], prefix), exist_ok=True)
 
     # Copy files to save directory
-    shutil.copy("./configs/2d_vit_config.yaml",
-                "{}{}_{}/{}/2d_vit_config.yaml".format(train_args['results_dir'], train_args['num_samples'],
+    shutil.copy("./configs/lucidrains_2d_vit_config.yaml",
+                "{}{}_{}/{}/lucidrains_2d_vit_config.yaml".format(train_args['results_dir'], train_args['num_samples'],
                                                            train_args['pretraining_num_samples'], prefix))
     shutil.copy("./plot_progress.py", "{}{}_{}/{}/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'],
                                                                                train_args['pretraining_num_samples'], prefix))
