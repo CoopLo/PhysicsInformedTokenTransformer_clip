@@ -1,0 +1,88 @@
+args:
+    device: 'cuda:0'
+    train_style: 'next_step' # 'fixed_future', 'rollout'
+    #results_dir: './just_sentence_lucidrains_vit_results/'
+    results_dir: './oformer_lucidrains_vit_results/'
+    base_path: '/home/cooperlorsung/'
+    pretrained_model_path: "./PRETRAINED_VITS/"
+    load_pretrained: True
+    #load_pretrained: False
+
+    #train_style: 'next_step'
+    train_style: 'fixed_future'
+    clip: True
+    coeff: True
+    #coeff: False
+    #pretraining_loss: 'clip'
+    pretraining_loss: 'weightedclip' # Or weightedclip or None
+    #llm: 'all-MiniLM-L6-v2'
+    llm: 'all-mpnet-base-v2'
+
+    num_workers: 0
+    batch_size: 32
+    #pretraining_batch_size: 32
+    #pretraining_batch_size: 256
+    pretraining_batch_size: 512
+    #initial_step: 10
+    initial_step: 5
+
+    t_train: 200
+    validate: 1
+
+    reduced_resolution: 4
+    reduced_resolution_t: 1
+    reduced_batch: 1
+
+    # Optimizer
+    #num_samples: 100
+    num_samples: 500
+    learning_rate: 1.e-3
+    weight_decay: 1.e-7
+    scheduler_step: 100
+    scheduler_gamma: 0.5
+    #epochs: 1000
+    #epochs: 50
+    epochs: 500
+    num_seeds: 5
+
+    # Pretraining optimizer
+    pretraining_num_samples: 0
+    #pretraining_num_samples: 10
+    #pretraining_num_samples: 100
+    #pretraining_num_samples: 10000
+    pretraining_epochs: 500
+    pretraining_learning_rate: 1.e-3
+    pretraining_weight_decay: 1.e-6
+    pretraining_training_type: single
+
+    # ViT Parameters
+    downsample: 1
+    img_size: 32
+    patch_size: 4
+    patch_stride: 8 # Works if stride >= patch_size/2? Not exactly sure...
+    dim: 32
+    depth: 2
+    heads: 8
+    mlp_dim: 128
+    pool: 'mean'
+    dim_head: 64
+    dropout: 0.0
+    emb_dropout: 0.0
+
+    qkv_bias: True
+
+    #num_x: 64
+    #num_y: 64
+    #num_x: 60
+    #num_y: 100
+    
+    sim_time: 31
+    
+
+    # Set to 0 to skip pretraining
+    #pretraining_num_samples: 0
+    samples_per_equation: 1
+
+    # Tracking
+    log_freq: 10
+    progress_plot_freq: 100
