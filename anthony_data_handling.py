@@ -149,6 +149,7 @@ class PDEDataset2D(Dataset):
                  downsample: int=1,
                  debug: bool=False,
                  subset: str='heat,adv,burger',
+                 coeff: bool=True,
                  ) -> None:
         """Initialize the dataset object
         Args:
@@ -174,6 +175,7 @@ class PDEDataset2D(Dataset):
         self.subset = subset
         self.device = device
         self.data = f[self.mode]
+        self.coeff = coeff
 
         if(mode == 'train'):
             self.num_samples = len(self.data["u"])+2 if(num_samples == -1) else num_samples
@@ -246,37 +248,41 @@ class PDEDataset2D(Dataset):
                     #ratios.append(ratio)
                     sentence = 'Burgers equation models a conservative system that can develop shock wave discontinuities.'
                     sentence += ' Burgers equation is a first order quasilinear hyperbolic partial differential equation.'
-                    sentence += ' In this case, the advection term has a coefficient of {} in the x direction, {} in the y direction, and the diffusion term has a coefficient of {}.'.format(self.cx[idx], self.cy[idx], self.nu[idx])
+                    if(self.coeff):
+                        sentence += ' In this case, the advection term has a coefficient of {} in the x direction, {} in the y direction, and the diffusion term has a coefficient of {}.'.format(self.cx[idx], self.cy[idx], self.nu[idx])
 
-                    cls = 'strongly' if(ratio > 100) else 'weakly'
-                    sim = ' not ' if(ratio > 100) else ' '
-                    sentence += ' This system is {} advection dominanted and does{}behave similarly to heat equation.'.format(cls, sim)
-                    sentence += ' Ths predicted state should have shocks.' if(cls == 'strongly') else ' The predicted state should look smoother than the inputs'
+                        cls = 'strongly' if(ratio > 100) else 'weakly'
+                        sim = ' not ' if(ratio > 100) else ' '
+                        sentence += ' This system is {} advection dominanted and does{}behave similarly to heat equation.'.format(cls, sim)
+                        sentence += ' Ths predicted state should have shocks.' if(cls == 'strongly') else ' The predicted state should look smoother than the inputs'
                 # Advection
                 elif(self.ax[idx] != 0 and self.ay[idx] != 0):
                     adv = ((self.ax[idx] + self.ay[idx])**2)**(0.5)
                     #advs.append(adv)
                     sentence = 'The Advection equation models bulk transport of a substance or quantity. It does not develop shocks.'
                     sentence += ' The Advection equation is a linear hyperbolic partial differential equation.'
-                    sentence += ' In this case, the advection term has a coefficient of {} in the x direction, {} in the y direction.'.format(self.ax[idx], self.ay[idx])
-
-                    cls = 'strongly' if(adv > 2) else 'weakly'
-                    sentence += ' This system is {} advective.'.format(cls)
-                    sentence += ' The predicted state should look like the input but shifted in space.'
+                    if(self.coeff):
+                        sentence += ' In this case, the advection term has a coefficient of {} in the x direction, {} in the y direction.'.format(self.ax[idx], self.ay[idx])
+    
+                        cls = 'strongly' if(adv > 2) else 'weakly'
+                        sentence += ' This system is {} advective.'.format(cls)
+                        sentence += ' The predicted state should look like the input but shifted in space.'
                 # Heat
                 elif(self.nu[idx] != 0 and self.cx[idx] == 0 and self.cy[idx] == 0):
                     sentence = 'The Heat equation models how a quantity such as heat diffuses through a given region.'
                     sentence += ' The Heat equation is a linear parabolic partial differential equation.'
-                    sentence += ' In this case, the diffusion term has a coefficient of {}.'.format(self.nu[idx])
+                    if(self.coeff):
+                        sentence += ' In this case, the diffusion term has a coefficient of {}.'.format(self.nu[idx])
 
-                    cls = 'strongly' if(self.nu[idx] > 0.01) else 'weakly'
-                    sentence += ' This system is {} diffusive.'.format(cls)
-                    sentence += ' The predicted state should look smoother than the inputs.'
+                        cls = 'strongly' if(self.nu[idx] > 0.01) else 'weakly'
+                        sentence += ' This system is {} diffusive.'.format(cls)
+                        sentence += ' The predicted state should look smoother than the inputs.'
 
-                sentence += " Theis system have periodic boundary conditions."
+                sentence += " This system has periodic boundary conditions."
                 sentence += " Give me an embedding that is useful for numerically predicting the target state."
                 if(self.sentence):
-                    while(len(sentence) < 650): # Pad them to have same length
+                    #while(len(sentence) < 650): # Pad them to have same length
+                    while(len(sentence) < 400): # Pad them to have same length
                         sentence += ' '
                     #while(len(sentence) < 400): # Pad them to have same length
                     #    sentence += ' '
@@ -285,20 +291,9 @@ class PDEDataset2D(Dataset):
                         print(len(sentence))
                         raise
                     self.sentences.append(sentence)
-                    #self.sentences.append(InputExample(texts=[sentence], label=0.0))
                 else:
                     self.sentence_embeddings.append(self.sentence_embedder.encode(sentence))
             print("Done.")
-
-        # Something is wrong here.
-        #from matplotlib import pyplot as plt
-        #for index in tqdm(self.indexes):
-        #    fig, ax = plt.subplots(ncols=2, figsize=(15,8))
-        #    ax[0].imshow(self.u[index][0].cpu())
-        #    ax[1].imshow(self.u[index][31].cpu())
-        #    plt.savefig("./image_test/{}.png".format(index))
-        #    plt.close()
-        #raise
 
     def __len__(self):
         return len(self.indexes)
@@ -336,9 +331,9 @@ class PDEDataset2D(Dataset):
                     u = torch.tensor(u)
                 u = self.augmentation(u, pde, self.shift)
 
-        if(self.clip):
+        if(self.clip and not self.sentence):
             return u, x.permute(1,2,0), variables, self.sentence_embeddings[original_idx]
-        elif(self.sentence):
+        elif(self.clip and self.sentence):
             return u, x.permute(1,2,0), variables, self.sentences[original_idx]
         else:
             #return u, x.permute(1,2,0), variables, self.sentence_embeddings[original_idx] ???
