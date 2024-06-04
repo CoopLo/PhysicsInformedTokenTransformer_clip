@@ -120,6 +120,7 @@ def new_get_data(config, pretraining=False, subset='heat,adv,burger'):
             subset=subset,
             coeff=config['coeff'],
             sentence=config['sentence'],
+            qualitative=config['qualitative'],
             debug=DEBUG,
     )
     val_data = PDEDataset2D(
@@ -141,6 +142,7 @@ def new_get_data(config, pretraining=False, subset='heat,adv,burger'):
             subset=subset,
             coeff=config['coeff'],
             sentence=config['sentence'],
+            qualitative=config['qualitative'],
             debug=DEBUG,
     )
     test_data = PDEDataset2D(
@@ -162,6 +164,7 @@ def new_get_data(config, pretraining=False, subset='heat,adv,burger'):
             subset=subset,
             coeff=config['coeff'],
             sentence=config['sentence'],
+            qualitative=config['qualitative'],
             debug=DEBUG,
     )
     batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
@@ -603,6 +606,27 @@ def evaluate(test_loader, transformer, loss_fn, config=None):
     return test_loss/(bn+1)
 
 
+def zero_shot_evaluate(transformer, config, seed, prefix, subset='Heat,Burger,Adv'):
+    path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
+    train_loader, val_loader, test_loader = new_get_data(config, subset=subset)
+    loss_fn = LpLoss(2,2)
+    print("\nEVALUATING...")
+    with torch.no_grad():
+        transformer.eval()
+        test_loss = 0
+        for bn, (x0, grid, coeffs, sentence_embeddings) in tqdm(enumerate(test_loader)):
+            # Forward pass: compute predictions by passing the input sequence through the transformer.
+            y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
+                                       times=test_loader.dataset.t)
+            test_loss += loss.item()
+
+    if(subset != 'heat,adv,burger'):
+        np.save("./{}/zero_shot_{}_test_vals_{}.npy".format(path, subset, seed), test_loss)
+    else:
+        np.save("./{}/zero_schot_test_vals_{}.npy".format(path, seed), test_loss)
+    return test_loss/(bn+1)
+
+
 def as_rollout(test_loader, transformer, loss_fn, config, prefix, subset):
     #src_mask = generate_square_subsequent_mask(640).cuda()
     all_y_preds, all_y_trues = [], []
@@ -704,7 +728,6 @@ def get_embeddings(transformer, train_loader, val_loader, test_loader):
     for s in tqdm(test_loader.dataset.sentences):
         test_sentences.append(transformer._llm_forward((s,))[0])
     test_loader.dataset.sentences = tuple(train_sentences)
-
 
     transformer.finished_pretraining()
     return train_loader, val_loader, test_loader
@@ -843,6 +866,8 @@ def run_training(transformer, config, prefix, subset='heat,adv,burger'):
     if(config['train_style'] == 'arbitrary_step'):
         as_rollout(test_loader, transformer, loss_fn, config, prefix, subset)
 
+    return model_path
+
 
 if __name__ == '__main__':
     # Create a transformer with an input dimension of 10, a hidden dimension
@@ -860,12 +885,14 @@ if __name__ == '__main__':
              "_" + train_args['llm']
     prefix += "_coeff" if(train_args['coeff']) else ""
     prefix += "_sentence" if(train_args['sentence']) else ""
+    prefix += "_qualitative" if(train_args['qualitative']) else ""
     train_args['prefix'] = prefix
 
     # Loop over number of samples
     #for ns in [50]:
     #for ns in [50, 100, 500, 1000]:
-    for ns in [1000]:
+    #for ns in [1000]:
+    for ns in [100]:
     #for ns in [500, 1000]:
         train_args['num_samples'] = ns
 
@@ -900,13 +927,25 @@ if __name__ == '__main__':
             model = get_transformer('vit', train_args)
             if(pretrained_model_path is not None):
                 model.load_state_dict(torch.load(pretrained_model_path)['model_state_dict'])
-            run_training(model, train_args, prefix)
+            transfer_model_path = run_training(model, train_args, prefix)
+
+            # Try zero-shot...
+            # Try transfer learning as well...
 
             for subset in ['heat', 'burger', 'adv']:
                 torch.manual_seed(seed)
                 np.random.seed(seed)
                 model = get_transformer('vit', train_args)
-                if(pretrained_model_path is not None):
+                if(train_args['transfer']):
+                    print("\nTRANSFER LEARNING FROM: {}\n".format(transfer_model_path))
+                    model.load_state_dict(torch.load(transfer_model_path)['model_state_dict'])
+
+                    print("\nDOING ZERO-SHOT EVALUATION\n")
+                    zero_shot_evaluate(model, train_args, seed, prefix, subset=subset)
+
+                elif(pretrained_model_path is not None):
+                    print("\nFINE TUNING FROM: {}\n".format(transfer_model_path))
                     model.load_state_dict(torch.load(pretrained_model_path)['model_state_dict'])
+
                 run_training(model, train_args, prefix, subset=subset)
     

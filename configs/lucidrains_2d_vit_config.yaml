@@ -2,28 +2,52 @@ args:
     device: 'cuda:0'
     #results_dir: './just_sentence_lucidrains_vit_results/'
     #results_dir: './oformer_lucidrains_vit_results/'
-    results_dir: './as_ic_oformer_lucidrains_vit_results/'
+    #results_dir: './as_ic_oformer_lucidrains_vit_results/'
     #results_dir: './no_pretrain_oformer_lucidrains_vit_results/'
+    #results_dir: './qualitative_lucidrains_vit_results/'
+    results_dir: './test_transferzeroshot_lucidrains_vit_results/'
     base_path: '/home/cooperlorsung/'
     #pretrained_model_path: "./AS_PRETRAINED_VITS/"
     #pretrained_model_path: "./NOPRETRAIN_AS_PRETRAINED_VITS/"
-    pretrained_model_path: "./FULL_PRETRAIN_AS_PRETRAINED_VITS/"
+    #pretrained_model_path: "./FULL_PRETRAIN_AS_PRETRAINED_VITS/"
+    pretrained_model_path: "./QUALITATIVE_PRETRAINED_MODELS/"
 
+    # Toggle moddel loading
     load_pretrained: True
     #load_pretrained: False
 
     #train_style: 'next_step'
-    #train_style: 'fixed_future'
-    train_style: 'arbitrary_step'
+    train_style: 'fixed_future'
+    #train_style: 'arbitrary_step'
+
+    ###
+    # Choose embedding strategy
+    ###
+    
     clip: True
-    #coeff: True
-    coeff: False
+    #coeff: False       # Whether or not we use coefficient information
+    coeff: True       # Whether or not we use coefficient information
+    
+    # Whether or not we incorporate qualitative information into text description. Can't use this without coefficient information
+    #qualitative: False
+    qualitative: True
+
+    # Whether or not we're returning sentences and training LLM end-to-end
+    sentence: False 
+    #sentence: True
+
+    #######################
+
+    ###
+    #  Choose pretraining/finetuning strategy
+    ###
+    pretraining: 'clip' # Or transfer...
+    transfer: True
+
     pretraining_loss: 'clip'
     #pretraining_loss: 'weightedclip' # Or weightedclip or None
     llm: 'all-MiniLM-L6-v2'
     #llm: 'all-mpnet-base-v2'
-    sentence: False
-    #sentence: True
 
     num_workers: 0
     #batch_size: 16
@@ -33,7 +57,7 @@ args:
     #pretraining_batch_size: 32
     #pretraining_batch_size: 256
     pretraining_batch_size: 512
-    initial_step: 5
+    initial_step: 1
     #initial_step: 7
 
     t_train: 200
@@ -47,25 +71,25 @@ args:
     num_samples: 100
     #num_samples: 500
     learning_rate: 1.e-2
-    weight_decay: 1.e-8
+    weight_decay: 1.e-6
     scheduler_step: 100
     scheduler_gamma: 0.5
     #epochs: 1000
     #epochs: 5
     #epochs: 50
     epochs: 500
-    num_seeds: 5
+    num_seeds: 1
 
     # Pretraining optimizer
-    pretraining_num_samples: 0
+    #pretraining_num_samples: 0
     #pretraining_num_samples: 10
     #pretraining_num_samples: 100
     #pretraining_num_samples: 1000
-    #pretraining_num_samples: 10000
-    pretraining_epochs: 100
+    pretraining_num_samples: 10000
     #pretraining_epochs: 1
+    pretraining_epochs: 100
     pretraining_learning_rate: 1.e-3
-    pretraining_weight_decay: 1.e-6
+    pretraining_weight_decay: 1.e-9
     pretraining_training_type: single
 
     # ViT Parameters
@@ -79,8 +103,8 @@ args:
     mlp_dim: 128
     pool: 'mean'
     dim_head: 64
-    dropout: 0.0
-    emb_dropout: 0.0
+    dropout: 0.05
+    emb_dropout: 0.05
 
     qkv_bias: True
 

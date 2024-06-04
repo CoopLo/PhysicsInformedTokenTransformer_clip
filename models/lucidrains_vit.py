@@ -209,6 +209,8 @@ class CLIPViT(nn.Module):
                 nn.SiLU(),
                 nn.Linear(64,1)
         )
+        self.pretrained = False
+
 
     def __repr__(self):
         return f'vit'
@@ -224,8 +226,8 @@ class CLIPViT(nn.Module):
 
         # Add sentence embeddings here
         sentence_emb = self.sentence_proj(sentence_embeddings) # Lets also try with/without
-        sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
 
+        # Get data embedding
         if(isinstance(self.x_proj, SpatialTemporalEncoder2D)):
             # Definitely not ideal... can rework if results are better
             coeffs = img[:,-5:]
@@ -238,16 +240,25 @@ class CLIPViT(nn.Module):
             x_emb = self.proj_down(x_emb)[...,0]
         else:
             x_emb = self.x_proj(x.flatten(1,2))
+
+        ### Normalize embeddings
+        sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
         x_emb = F.normalize(x_emb, p=2, dim=-1)
 
         if(return_embedding):
+            ##sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
+            ##x_emb = F.normalize(x_emb, p=2, dim=-1)
             cross_corr = x_emb @ sentence_emb.T
             return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1), cross_corr
         if(clip):
+            # Normalize embeddings
+            ##sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
+            ##x_emb = F.normalize(x_emb, p=2, dim=-1)
             cross_corr = x_emb @ sentence_emb.T
             return cross_corr
         else:
             embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)#.detach() -> only detach if we've done pretraining
+            embedding = embedding.detach() if(self.pretrained) else embedding
             x = torch.cat((x, embedding), dim=1)
             #print(sentence_emb.shape)
             #print(x.shape)
@@ -262,6 +273,10 @@ class CLIPViT(nn.Module):
         x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
         
         return x.unsqueeze(-1)
+
+
+    def finished_pretraining(self):
+        self.pretrained = True
 
 
 class LLMCLIPViT(nn.Module):

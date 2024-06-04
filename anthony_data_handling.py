@@ -150,6 +150,7 @@ class PDEDataset2D(Dataset):
                  debug: bool=False,
                  subset: str='heat,adv,burger',
                  coeff: bool=True,
+                 qualitative: bool=False
                  ) -> None:
         """Initialize the dataset object
         Args:
@@ -175,7 +176,12 @@ class PDEDataset2D(Dataset):
         self.subset = subset
         self.device = device
         self.data = f[self.mode]
-        self.coeff = coeff
+
+        # Different embedding strategies (Maybe rename to be more clear...)
+        self.clip = clip                # Use LLM
+        self.sentence = sentence        # Return sentences and train LLM end-to-end
+        self.coeff = coeff              # Use sentence information
+        self.qualitative = qualitative  # Include qualitative information
 
         if(mode == 'train'):
             self.num_samples = len(self.data["u"])+2 if(num_samples == -1) else num_samples
@@ -224,9 +230,6 @@ class PDEDataset2D(Dataset):
 
         f.close()
 
-        # Use LLM if CLIP
-        self.clip = clip
-        self.sentence = sentence
         if(self.clip or self.sentence):
 
             # Only get sentence_embedder if we're not returning whole sentences
@@ -249,12 +252,16 @@ class PDEDataset2D(Dataset):
                     sentence = 'Burgers equation models a conservative system that can develop shock wave discontinuities.'
                     sentence += ' Burgers equation is a first order quasilinear hyperbolic partial differential equation.'
                     if(self.coeff):
-                        sentence += ' In this case, the advection term has a coefficient of {} in the x direction, {} in the y direction, and the diffusion term has a coefficient of {}.'.format(self.cx[idx], self.cy[idx], self.nu[idx])
+                        sentence += ' In this case, the advection term has a coefficient of {} in the x direction, '
+                        sentence += '{} in the y direction, and the diffusion term has a coefficient of {}.'.format(self.cx[idx],
+                                                                                                          self.cy[idx], self.nu[idx])
 
-                        cls = 'strongly' if(ratio > 100) else 'weakly'
-                        sim = ' not ' if(ratio > 100) else ' '
-                        sentence += ' This system is {} advection dominanted and does{}behave similarly to heat equation.'.format(cls, sim)
-                        sentence += ' Ths predicted state should have shocks.' if(cls == 'strongly') else ' The predicted state should look smoother than the inputs'
+                        if(self.qualitative):
+                            cls = 'strongly' if(ratio > 100) else 'weakly'
+                            sim = ' not ' if(ratio > 100) else ' '
+                            sentence += ' This system is {} advection dominanted and does{}behave similarly to heat equation.'.format(cls, sim)
+                            sentence += ' Ths predicted state should have shocks.' if(cls == 'strongly') else \
+                                        ' The predicted state should look smoother than the inputs'
                 # Advection
                 elif(self.ax[idx] != 0 and self.ay[idx] != 0):
                     adv = ((self.ax[idx] + self.ay[idx])**2)**(0.5)
@@ -262,11 +269,14 @@ class PDEDataset2D(Dataset):
                     sentence = 'The Advection equation models bulk transport of a substance or quantity. It does not develop shocks.'
                     sentence += ' The Advection equation is a linear hyperbolic partial differential equation.'
                     if(self.coeff):
-                        sentence += ' In this case, the advection term has a coefficient of {} in the x direction, {} in the y direction.'.format(self.ax[idx], self.ay[idx])
+                        sentence += ' In this case, the advection term has a coefficient of {} in the x direction, '
+                        sentence += '{} in the y direction.'.format(self.ax[idx], self.ay[idx])
     
-                        cls = 'strongly' if(adv > 2) else 'weakly'
-                        sentence += ' This system is {} advective.'.format(cls)
-                        sentence += ' The predicted state should look like the input but shifted in space.'
+                        if(self.qualitative):
+                            cls = 'strongly' if(adv > 2) else 'weakly'
+                            sentence += ' This system is {} advective.'.format(cls)
+                            sentence += ' The predicted state should look like the input but shifted in space.'
+
                 # Heat
                 elif(self.nu[idx] != 0 and self.cx[idx] == 0 and self.cy[idx] == 0):
                     sentence = 'The Heat equation models how a quantity such as heat diffuses through a given region.'
@@ -274,12 +284,13 @@ class PDEDataset2D(Dataset):
                     if(self.coeff):
                         sentence += ' In this case, the diffusion term has a coefficient of {}.'.format(self.nu[idx])
 
-                        cls = 'strongly' if(self.nu[idx] > 0.01) else 'weakly'
-                        sentence += ' This system is {} diffusive.'.format(cls)
-                        sentence += ' The predicted state should look smoother than the inputs.'
+                        if(self.qualitative):
+                            cls = 'strongly' if(self.nu[idx] > 0.01) else 'weakly'
+                            sentence += ' This system is {} diffusive.'.format(cls)
+                            sentence += ' The predicted state should look smoother than the inputs.'
 
                 sentence += " This system has periodic boundary conditions."
-                sentence += " Give me an embedding that is useful for numerically predicting the target state."
+                #sentence += " Give me an embedding that is useful for numerically predicting the target state."
                 if(self.sentence):
                     #while(len(sentence) < 650): # Pad them to have same length
                     while(len(sentence) < 400): # Pad them to have same length

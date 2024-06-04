@@ -294,6 +294,26 @@ def evaluate(test_loader, transformer, loss_fn, config=None):
     return test_loss/(bn+1)
 
 
+def zero_shot_evaluate(transformer, config, seed, prefix, subset='Heat,Burger,Adv'):
+    path = "{}{}/{}".format(config['results_dir'], config['num_samples'], prefix)
+    train_loader, val_loader, test_loader = new_get_data(config, subset=subset)
+    loss_fn = LpLoss(2,2)
+    print("\nEVALUATING...")
+    with torch.no_grad():
+        transformer.eval()
+        test_loss = 0
+        for bn, (x0, grid, coeffs) in tqdm(enumerate(test_loader)):
+            # Forward pass: compute predictions by passing the input sequence through the transformer.
+            y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, loss_fn, times=test_loader.dataset.t)
+            test_loss += loss.item()
+
+    if(subset != 'heat,adv,burger'):
+        np.save("./{}/zero_shot_{}_test_vals_{}.npy".format(path, subset, seed), test_loss/(bn+1))
+    else:
+        np.save("./{}/zero_schot_test_vals_{}.npy".format(path, seed), test_loss/(bn+1))
+    return test_loss/(bn+1)
+
+
 def as_rollout(test_loader, transformer, loss_fn, config, prefix, subset):
     #src_mask = generate_square_subsequent_mask(640).cuda()
     all_y_preds, all_y_trues = [], []
@@ -371,15 +391,12 @@ def as_rollout(test_loader, transformer, loss_fn, config, prefix, subset):
     return test_loss/(idx+1)
 
 
-def run_training(config, prefix, subset='heat,adv,burger'):
+def run_training(transformer, config, prefix, subset='heat,adv,burger'):
     path = "{}{}/{}".format(config['results_dir'], config['num_samples'], prefix)
     model_name = 'vit' + "_{}.pt".format(seed)
     if(subset != 'heat,adv,burger'):
         model_name = subset + "_" + model_name
     model_path = path + "/" + model_name
-
-    # Create the transformer model.
-    transformer = get_transformer('vit', config)
 
     total_params = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
     print(f'Total parameters = {total_params}')
@@ -503,6 +520,8 @@ def run_training(config, prefix, subset='heat,adv,burger'):
     if(config['train_style'] == 'arbitrary_step'):
         as_rollout(test_loader, transformer, loss_fn, config, prefix, subset)
 
+    return model_path
+
 
 if __name__ == '__main__':
     # Create a transformer with an input dimension of 10, a hidden dimension
@@ -522,7 +541,8 @@ if __name__ == '__main__':
 
     # Loop over number of samples
     #for ns in [50, 100, 500, 1000]:
-    for ns in [1000]:
+    #for ns in [1000]:
+    for ns in [100]:
         train_args['num_samples'] = ns
 
         # Creat save directory
@@ -546,7 +566,21 @@ if __name__ == '__main__':
             np.random.seed(seed)
             train_args['seed'] = seed
 
-            #run_training(train_args, prefix)
+            # Try zero-shot and transfer learning...
+
+            # Create the transformer model.
+            #transformer = get_transformer('vit', config)
+            transformer = get_transformer('vit', train_args)
             for subset in ['heat,adv,burger', 'heat', 'burger', 'adv']:
-                run_training(train_args, prefix, subset=subset)
+                model_path = run_training(transformer, train_args, prefix, subset=subset)
+
+                if(train_args['transfer'] and subset == 'heat,adv,burger'):
+                    transfer_model_path = model_path
+                    
+                if(train_args['transfer']):
+                    print("\nTRANSFER LEARNING FROM: {}\n".format(transfer_model_path))
+                    transformer.load_state_dict(torch.load(transfer_model_path)['model_state_dict'])
+
+                    print("\nDOING ZERO-SHOT EVALUATION\n")
+                    zero_shot_evaluate(transformer, train_args, seed, prefix, subset=subset)
     
