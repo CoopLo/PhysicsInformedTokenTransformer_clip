@@ -1,8 +1,10 @@
 args:
     device: 'cuda:0'
-      #results_dir: './pdebench_vit_results/'
-      #results_dir: './combined_pdebench_vit_results/'
-    results_dir: './overlap_combined_pdebench_vit_results/'
+    #results_dir: './pdebench_vit_results/'
+    #results_dir: './combined_pdebench_vit_results/'
+    #results_dir: './overlap_combined_pdebench_transolver_results/'
+    #results_dir: './test_transfer/'
+    results_dir: './leterrip_results_transfer/'
 
     base_path: '/home/cooperlorsung/'
     #pretrained_model_path: "./AS_PRETRAINED_VITS/"
@@ -42,6 +44,10 @@ args:
     coeff: False       # Whether or not we use coefficient information
     #coeff: True       # Whether or not we use coefficient information
     
+    # Whether or not we add boundary condition information into text description
+    #bcs: False
+    bcs: True
+    
     # Whether or not we incorporate qualitative information into text description. Can't use this without coefficient information
     qualitative: False
     #qualitative: True
@@ -56,8 +62,8 @@ args:
     #  Choose pretraining/finetuning strategy
     ###
     pretraining: 'clip' # Or transfer...
-    #transfer: True
-    transfer: False
+    transfer: True
+    #transfer: False
 
     pretraining_loss: 'clip'
     #pretraining_loss: 'weightedclip' # Or weightedclip or None
@@ -93,8 +99,8 @@ args:
     #epochs: 1000
     #epochs: 1
     #epochs: 5
-    #epochs: 500
-    epochs: 2000
+    epochs: 500
+    #epochs: 2000
     num_seeds: 1
 
     # Pretraining optimizer
@@ -110,9 +116,10 @@ args:
     pretraining_training_type: single
 
     # ViT Parameters
-    #downsample: 1
-    #img_size: 128
-    img_size: 64
+    img_size: 128    # Note: Setting img_size overrides reduced_resolution
+    #img_size: 64
+    #img_size: 32
+
     patch_size: 8
     patch_stride: 8 # Works if stride >= patch_size/2? Not exactly sure...
     dim: 64

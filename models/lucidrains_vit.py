@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
+from torch.nn import Unfold, Fold
 
 from .oformer import SpatialTemporalEncoder2D
 from sentence_transformers import SentenceTransformer
@@ -85,15 +86,18 @@ class Transformer(nn.Module):
 
         return self.norm(x)
 
+
 class ViT(nn.Module):
-    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
+    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., out_channels=1):
         super().__init__()
+        self.channels = channels
         image_height, image_width = pair(image_size)
         patch_height, patch_width = pair(patch_size)
 
         assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
         
         num_patches = (image_height // patch_height) * (image_width // patch_width)
+        print("CHANNELS: {}".format(channels))
         patch_dim = channels * patch_height * patch_width
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
         
@@ -114,12 +118,24 @@ class ViT(nn.Module):
 
         self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
         self.num_features = dim
-        self.pool = pool 
+
+        # Don't do pooling
+        #self.pool = pool 
+
+        # Project down to correct number of channels
+        self.proj_down = nn.Sequential(
+                             nn.Linear(4, 16),           # Not sure why this is hard-coded to 4.
+                             nn.SiLU(),
+                             nn.Linear(16, 16),
+                             nn.SiLU(),
+                             nn.Linear(16, out_channels)
+        )
         self.to_latent = nn.Identity()
+        self.channels = channels
 
     
-    def __repr__(self):
-        return f'vit'
+    #def __repr__(self):
+    #    return f'vit'
     
     def forward(self, img, features=False):
         x = self.to_patch_embedding(img)
@@ -135,20 +151,130 @@ class ViT(nn.Module):
         # Remove class token
         x = x[:,:-1]
         x = self.unpatchify(x)
-        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+        #x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+        x = self.proj_down(x.permute(0,2,3,1)).permute(0,3,1,2)
+        
+        return x.unsqueeze(-1)
+
+
+class OverlapViT(nn.Module):
+    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., out_channels=1):
+        super().__init__()
+        self.channels = channels
+        image_height, image_width = pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+
+        assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
+        
+        #num_patches = (image_height // patch_height) * (image_width // patch_width)
+        print("CHANNELS: {}".format(channels))
+        patch_dim = channels * patch_height * patch_width
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+        
+        self.rearranger = Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width)
+        self.unfolder = Unfold(kernel_size=patch_height, dilation=1, padding=0, stride=patch_height//2)
+
+        self.to_patch_embedding = nn.Sequential(
+            #Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
+            #Unfold(kernel_size=patch_height, dilation=1, padding=0, stride=patch_height//2),
+            nn.LayerNorm(patch_dim),
+            nn.Linear(patch_dim, out_channels*dim),
+            nn.LayerNorm(out_channels*dim),
+        )
+
+        # From unfold documentation
+        num_patches = int(((image_size + 2*0 - (1 * (patch_height - 1)) - 1)/(patch_height//2))+1)**2
+        print(num_patches)
+
+        self.unpatchify = nn.Sequential(
+            Rearrange('b (h w) (p1 p2 c) -> b c (h p1) (w p2)', p1 = patch_height, p2 = patch_width, h = image_height // patch_height, w = image_width // patch_width)
+        )
+        self.folder = Fold(output_size=(image_size, image_size), kernel_size=patch_height, stride=patch_height//2)
+        
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, out_channels*dim))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, out_channels*dim))
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.transformer = Transformer(out_channels*dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.num_features = dim
+
+        # Don't do pooling
+        #self.pool = pool 
+
+        # Project down to correct number of channels
+        self.proj_down = nn.Sequential(
+                             nn.Linear(4, 16),           # Not sure why this is hard-coded to 4.
+                             nn.SiLU(),
+                             nn.Linear(16, 16),
+                             nn.SiLU(),
+                             nn.Linear(16, out_channels)
+        )
+        self.to_latent = nn.Identity()
+        self.channels = channels
+
+    
+    #def __repr__(self):
+    #    return f'vit'
+    
+    def forward(self, img, features=False):
+
+        #print("\n\nIMG SHAPE: {}".format(img.shape))
+
+        rearange = self.rearranger(img)
+        #print("REARRANGED: {}".format(rearange.shape))
+
+        img = self.unfolder(img)#.permute(0,2,1)
+        #print("FOLDED: {}".format(img.shape))
+        #print("CHECK: {}\n\n".format((unfold == rearange).all()))
+        #raise
+
+        x = self.to_patch_embedding(img.permute(0,2,1))
+        b, n, _ = x.shape
+        
+        #print("POST EMBEDDING: {}".format(x.shape))
+        cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
+        #print(x.shape, cls_tokens.shape)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding[:, :(n + 1)]
+        x = self.dropout(x)
+        
+        x = self.transformer(x)
+        
+        # Remove class token
+        x = x[:,:-1]
+        #print()
+        #print("POST TRANSFORMER: {}".format(x.shape))
+        x = self.folder(x.permute(0,2,1))
+        #print("POST UNFOLDING: {}".format(x.shape))
+        #print()
+        #return x.unsqueeze(-1)#.permute(0,2,3,1)
+        #x = self.unpatchify(x)
+        #x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+        x = self.proj_down(x.permute(0,2,3,1)).permute(0,3,1,2)
         
         return x.unsqueeze(-1)
 
 
 class CLIPViT(nn.Module):
-    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., llm=None):
+    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., llm=None, out_channels=1):
         super().__init__()
+        self.channels = channels
         self.llm = llm
         image_height, image_width = pair(image_size)
         patch_height, patch_width = pair(patch_size)
 
         assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
         
+        #num_patches = (image_height // patch_height) * (image_width // patch_width)
+        #patch_dim = channels * patch_height * patch_width
+        #assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+        #
+        #self.to_patch_embedding = nn.Sequential(
+        #    Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
+        #    nn.LayerNorm(patch_dim),
+        #    nn.Linear(patch_dim, dim),
+        #    nn.LayerNorm(dim),
+        #)
         num_patches = (image_height // patch_height) * (image_width // patch_width)
         patch_dim = channels * patch_height * patch_width
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
@@ -182,7 +308,8 @@ class CLIPViT(nn.Module):
                                  nn.ReLU(),
                                  nn.Linear(2*dim, dim),
                                  nn.ReLU(),
-                                 nn.Linear(dim, dim//2)
+                                 #nn.Linear(dim, dim//2)
+                                 nn.Linear(dim, dim)
                                  #nn.Linear(2*dim, dim)
         )
 
@@ -209,11 +336,20 @@ class CLIPViT(nn.Module):
                 nn.SiLU(),
                 nn.Linear(64,1)
         )
+
+        self.final_proj_down = nn.Sequential(
+                             nn.Linear(4, 16),           # Not sure why this is hard-coded to 4.
+                             nn.SiLU(),
+                             nn.Linear(16, 16),
+                             nn.SiLU(),
+                             nn.Linear(16, out_channels)
+        )
         self.pretrained = False
 
 
-    def __repr__(self):
-        return f'vit'
+    #def __repr__(self):
+    #    return f'vit'
+
     
     def forward(self, img, sentence_embeddings, clip=False, return_embedding=False):
         x = self.to_patch_embedding(img)
@@ -228,22 +364,22 @@ class CLIPViT(nn.Module):
         sentence_emb = self.sentence_proj(sentence_embeddings) # Lets also try with/without
 
         # Get data embedding
-        if(isinstance(self.x_proj, SpatialTemporalEncoder2D)):
-            # Definitely not ideal... can rework if results are better
-            coeffs = img[:,-5:]
-            grid = img[:,-7:-5]
-            data = img[:,:-7]
-            data = torch.cat((data, coeffs), dim=1).flatten(2,3).permute(0,2,1)
-            grid = grid.flatten(2,3).permute(0,2,1)
+        #if(isinstance(self.x_proj, SpatialTemporalEncoder2D)):
+        #    # Definitely not ideal... can rework if results are better
+        #    coeffs = img[:,-5:]
+        #    grid = img[:,-7:-5]
+        #    data = img[:,:-7]
+        #    data = torch.cat((data, coeffs), dim=1).flatten(2,3).permute(0,2,1)
+        #    grid = grid.flatten(2,3).permute(0,2,1)
 
-            x_emb = self.x_proj(data, input_pos=grid).permute(0,2,1)
-            x_emb = self.proj_down(x_emb)[...,0]
-        else:
-            x_emb = self.x_proj(x.flatten(1,2))
+        #    x_emb = self.x_proj(data, input_pos=grid).permute(0,2,1)
+        #    x_emb = self.proj_down(x_emb)[...,0]
+        #else:
+        #    x_emb = self.x_proj(x.flatten(1,2))
 
         ### Normalize embeddings
         sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
-        x_emb = F.normalize(x_emb, p=2, dim=-1)
+        #x_emb = F.normalize(x_emb, p=2, dim=-1)
 
         if(return_embedding):
             ##sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
@@ -257,11 +393,12 @@ class CLIPViT(nn.Module):
             cross_corr = x_emb @ sentence_emb.T
             return cross_corr
         else:
-            embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)#.detach() -> only detach if we've done pretraining
+
+            #embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)
+            embedding = sentence_emb.unsqueeze(1).clone()
+
             embedding = embedding.detach() if(self.pretrained) else embedding
             x = torch.cat((x, embedding), dim=1)
-            #print(sentence_emb.shape)
-            #print(x.shape)
             #x = torch.cat((x, sentence_emb.unsqueeze(1)), dim=1)
 
         # Transformer forward
@@ -270,7 +407,11 @@ class CLIPViT(nn.Module):
         # Remove class token
         x = x[:,:-2]
         x = self.unpatchify(x)
-        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+
+        # No pooling.
+        #x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+
+        x = self.final_proj_down(x.permute(0,2,3,1)).permute(0,3,1,2)
         
         return x.unsqueeze(-1)
 
