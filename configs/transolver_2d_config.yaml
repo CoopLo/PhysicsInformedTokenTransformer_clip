@@ -83,7 +83,7 @@ args:
     #initial_step: 7
 
     t_train: 200
-    validate: 100
+    validate: 1
 
     reduced_resolution: 2
     reduced_resolution_t: 1
@@ -92,7 +92,7 @@ args:
     # Optimizer
     #num_samples: 100
     num_samples: 500
-    learning_rate: 1.e-3
+    learning_rate: 1.e-4
     weight_decay: 1.e-8
     scheduler_step: 100
     scheduler_gamma: 0.5
@@ -145,5 +145,5 @@ args:
     samples_per_equation: 1
 
     # Tracking
-    log_freq: 100
+    log_freq: 25
     progress_plot_freq: 100

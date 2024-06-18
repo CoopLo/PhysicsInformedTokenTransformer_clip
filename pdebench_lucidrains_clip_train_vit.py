@@ -929,32 +929,34 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
         train_loss /= (bn + 1)
         train_losses.append(train_loss)
 
-        with torch.no_grad():
-            transformer.eval()
-            val_loss = 0
-            all_val_preds = []
-            for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(val_loader):
-                # Forward pass: compute predictions by passing the input sequence
-                y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
-                                           times=train_loader.dataset.tsteps_t)
-                all_val_preds.append(y_pred.detach())
+        if((epoch%config['validate'] == 0) or ((epoch+1) == config['epochs'])):
+            #print("VALIDATING")
+            with torch.no_grad():
+                transformer.eval()
+                val_loss = 0
+                all_val_preds = []
+                for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(val_loader):
+                    # Forward pass: compute predictions by passing the input sequence
+                    y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
+                                               times=train_loader.dataset.tsteps_t)
+                    all_val_preds.append(y_pred.detach())
 
-                val_loss += loss.item()
-                if(bn == 0):
-                    y_val_true = y.clone()
-                    y_val_pred = y_pred.clone()
+                    val_loss += loss.item()
+                    if(bn == 0):
+                        y_val_true = y.clone()
+                        y_val_pred = y_pred.clone()
 
-            val_loss /= (bn + 1)
-            if  val_loss < loss_val_min:
-                loss_val_min = val_loss
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': transformer.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': loss_val_min
-                    }, model_path)
+                val_loss /= (bn + 1)
+                if  val_loss < loss_val_min:
+                    loss_val_min = val_loss
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': transformer.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'loss': loss_val_min
+                        }, model_path)
 
-        val_losses.append(val_loss)
+            val_losses.append(val_loss)
 
         # Print the loss at the end of each epoch.
         if(epoch%config['log_freq'] == 0):
@@ -1043,7 +1045,7 @@ if __name__ == '__main__':
     # Loop over number of samples TODO: ns = -1 is not supported in autoregressive rollout
     #for ns in [50, 100, 500, 1000]:
     #for ns in [10]:
-    for ns in [50, 100]:
+    for ns in [10, 20, 50, 100]:
     #for ns in [20, 50, 100, 500, 1000]:
 
     #for ns in [10, 20, 50, 100, 500, 1000]:
