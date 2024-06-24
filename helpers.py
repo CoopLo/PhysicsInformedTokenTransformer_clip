@@ -107,6 +107,8 @@ def get_single_dataset(config, filename, extension, pretraining=False):
             image_size=config['img_size'],
 
             transfer=config['transfer'],
+            
+            normalize=config['normalize'],
     )
     val_data = FNODatasetSingle(
             filename=filename,
@@ -128,6 +130,8 @@ def get_single_dataset(config, filename, extension, pretraining=False):
             image_size=config['img_size'],
 
             transfer=config['transfer'],
+
+            normalize=config['normalize'],
     )
     test_data = FNODatasetSingle(
             filename=filename,
@@ -149,6 +153,8 @@ def get_single_dataset(config, filename, extension, pretraining=False):
             image_size=config['img_size'],
 
             transfer=config['transfer'],
+            
+            normalize=config['normalize'],
     )
 
     return train_data, val_data, test_data
@@ -174,6 +180,8 @@ def get_multi_dataset(config, filenames, saved_folders, pretraining=False):
             sentence=config['sentence'],   
             qualitative=config['qualitative'],
             image_size=config['img_size'],
+            
+            normalize=config['normalize'],
     )
     print("\nVAL DATA")
     val_data = MultiDataset(      
@@ -194,6 +202,8 @@ def get_multi_dataset(config, filenames, saved_folders, pretraining=False):
             sentence=config['sentence'],
             qualitative=config['qualitative'],
             image_size=config['img_size'],
+            
+            normalize=config['normalize'],
     )
     print("\nTEST DATA")
     test_data = MultiDataset(
@@ -214,6 +224,8 @@ def get_multi_dataset(config, filenames, saved_folders, pretraining=False):
             sentence=config['sentence'],
             qualitative=config['qualitative'],
             image_size=config['img_size'],
+            
+            normalize=config['normalize'],
     )
 
     return train_data, val_data, test_data

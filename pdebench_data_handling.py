@@ -183,6 +183,7 @@ class FNODatasetSingle(Dataset):
                  image_size = None,
 
                  transfer = False,
+                 normalize = False
                  ):
         """
         
@@ -204,6 +205,7 @@ class FNODatasetSingle(Dataset):
         self.qualitative = qualitative
         self.transfer = transfer
         self.bcs = bcs
+        self.normalize = normalize
 
         # LLM attributes
         self.clip = clip
@@ -438,6 +440,24 @@ class FNODatasetSingle(Dataset):
 
         self.data = self.data.cuda()
         self.grid = self.grid.cuda()
+        #print()
+        #print(self.data.shape)
+        if(self.normalize):
+            self.means = self.data.mean(dim=(0,1,2))[None,None,None]
+            self.stds = self.data.std(dim=(0,1,2))[None,None,None]
+            #print(self.data.shape)
+            #print(self.means.shape)
+            #print(self.stds.shape)
+            #print()
+            #print(self.data.min(), self.data.max())
+            #print(self.means.max(), self.means.min())
+            #print(self.stds.max(), self.stds.min())
+            #print(self.means)
+            #print(self.stds)
+            self.data = (self.data - self.means)/self.stds
+            #print(self.data.min(), self.data.max())
+        #print()
+        #raise
 
 
     def get_llm(self):
@@ -629,6 +649,7 @@ class MultiDataset(Dataset):
 
                  image_size = None,
                  bcs = False,
+                 normalize = False,
                  ):
 
         self.dsets = []
@@ -658,6 +679,8 @@ class MultiDataset(Dataset):
                     qualitative=qualitative,
 
                     image_size=image_size,
+
+                    normalize=normalize,
             ))
 
             # Need to adjust resolution and timeframe... try down first, then try up if its an issue, I suppose
@@ -700,26 +723,7 @@ class MultiDataset(Dataset):
     def __getitem__(self, idx):
         dset_idx = idx%len(self.dsets)
         sample_idx = idx//len(self.dsets)
-        #print(self.data.shape)
-        #print()
-        #print(dset_idx, sample_idx, idx)
-        #print()
         if(self.clip or self.sentence):
             return self.data[idx], self.grids[dset_idx], 99999., self.dsets[dset_idx].sentence_embeddings[sample_idx]
         else:
             return self.data[idx], self.grids[dset_idx], 99999.
-        #if(self.clip or self.sentence):
-        #    data, grid, other, sentence_embeddings = self.dsets[dset_idx].__getitem__(sample_idx)
-        #
-        #    # Add channel of 0s for data with lower number of channels, may need more for other datasets.
-        #    if(data.shape[-1] == 1):
-        #        data = torch.cat((data, torch.zeros(data.shape)), dim=-1)
-        #    return data, grid, other, sentence_embeddings
-        #else:
-        #    data, grid, other = self.dsets[dset_idx].__getitem__(sample_idx)
-        #
-        #    # Add channel of 0s for data with lower number of channels, may need more for other datasets.
-        #    if(data.shape[-1] == 1):
-        #        data = torch.cat((data, torch.zeros(data.shape)), dim=-1)
-        #    return data, grid, other
-

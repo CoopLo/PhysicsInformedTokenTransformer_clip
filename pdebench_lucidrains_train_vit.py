@@ -268,6 +268,7 @@ def get_transformer(model_name, config):
                 out_dim = out_channels,    # Number of output channels varies based on dataset
                 H=config['img_size'],
                 W=config['img_size'],
+                n_layers=config['depth'],
         ).to(device)
 
     else:
@@ -343,9 +344,10 @@ def get_loss(config, transformer, x0, grid, coeffs, loss_fn, times=None, evaluat
         ch2 = not((y[...,-1,2] == 0).all())
         ch3 = not((y[...,-1,3] == 0).all())
         chans = [ch0, ch1, ch2, ch3]
+        rel_l2 = loss_fn(y_pred[...,chans], y[...,chans])
         err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = metric_func(y_pred[...,chans], y[...,chans], if_mean=True,
                                                                            Lx=1., Ly=1., Lz=1.)
-        return y_pred, y, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F
+        return y_pred, y, rel_l2, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F
     else:
         loss = loss_fn(y_pred, y)
         return y_pred, y, loss
@@ -360,11 +362,11 @@ def evaluate(test_loader, transformer, loss_fn, config=None):
         for bn, (x0, grid, coeffs) in enumerate(test_loader):
             # Forward pass: compute predictions by passing the input sequence
             # through the transformer.
-            y_pred, y, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
+            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
                                                                                        loss_fn, times=test_loader.dataset.tsteps_t,
                                                                                        evaluate=True)
-            #test_loss += loss.item()
-            test_loss += err_nRMSE.item()
+            test_loss += loss.item()
+            #test_loss += err_nRMSE.item()
 
             metrics['RMSE'].append(err_RMSE)
             metrics['nRMSE'].append(err_nRMSE)
@@ -389,11 +391,11 @@ def zero_shot_evaluate(transformer, config, seed, prefix, subset='Heat,Burger,Ad
         for bn, (x0, grid, coeffs) in tqdm(enumerate(test_loader)):
             # Forward pass: compute predictions by passing the input sequence through the transformer.
             #y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, loss_fn, times=test_loader.dataset.tsteps_t, evaluate=True)
-            y_pred, y, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
+            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
                                                                                        loss_fn, times=test_loader.dataset.tsteps_t,
                                                                                        evaluate=True)
             #test_loss += loss.item()
-            test_loss += err_nRMSE.item()
+            test_loss += loss.item()
 
             metrics['RMSE'].append(err_RMSE)
             metrics['nRMSE'].append(err_nRMSE)
@@ -748,8 +750,11 @@ if __name__ == '__main__':
 
     # Loop over number of samples TODO: ns = -1 is not supported in autoregressive rollout
     #for ns in [50, 100, 500, 1000]:
-    #for ns in [10]:
-    for ns in [10, 20, 50, 100]:
+    #for ns in [50]:
+
+    #for ns in [10, 20, 50, 100]:
+    for ns in [50, 100, 200, 500, 1000]:
+        
     #for ns in [20, 50, 100, 500, 1000]:
 
     #for ns in [10, 20, 50, 100, 500, 1000]:
@@ -757,7 +762,7 @@ if __name__ == '__main__':
     #for ns in [20]:#, 50, 100, 500, 1000]:
     #for ns in [50, 100, 500, 1000]:
     #for ns in [100]:
-    #for ns in [100, 500, 1000]:
+    #for ns in [100, 200, 500, 1000]:
     #for ns in [500, 1000]:
         train_args['num_samples'] = ns
         train_args['num_data_samples'] = ns

@@ -4,7 +4,7 @@ args:
     #results_dir: './combined_pdebench_vit_results/'
     #results_dir: './overlap_combined_pdebench_transolver_results/'
     #results_dir: './test_transfer/'
-    results_dir: './leterrip_results_transfer/'
+    results_dir: './normalize_leterrip_results_transfer/'
 
     base_path: '/home/cooperlorsung/'
     #pretrained_model_path: "./AS_PRETRAINED_VITS/"
@@ -26,7 +26,7 @@ args:
     ###
     #dataset: 'shallow_water'
     #dataset: 'diffusion_reaction'
-    #dataset: 'cfd_rand_0.1_0.01_0.01'
+    dataset: 'cfd_rand_0.1_0.01_0.01'
     #dataset: 'cfd_rand_0.1_0.1_0.1'
     #dataset: 'cfd_rand_0.1_1e-8_1e-8'
     #dataset: 'cfd_rand_1.0_0.01_0.01'
@@ -34,7 +34,11 @@ args:
     #dataset: 'cfd_rand_1.0_1e-8_1e-8'
     #dataset: 'cfd_turb_0.1_1e-8_1e-8'
     #dataset: 'cfd_turb_1.0_1e-8_1e-8'
-    dataset: 'all'
+    #dataset: 'all'
+
+    # Normalize across each channel of our data
+    normalize: False
+    #normalize: True
 
     ###
     # Choose embedding strategy
@@ -62,8 +66,8 @@ args:
     #  Choose pretraining/finetuning strategy
     ###
     pretraining: 'clip' # Or transfer...
-    transfer: True
-    #transfer: False
+    #transfer: True
+    transfer: False
 
     pretraining_loss: 'clip'
     #pretraining_loss: 'weightedclip' # Or weightedclip or None
@@ -116,8 +120,8 @@ args:
     pretraining_training_type: single
 
     # ViT Parameters
-    img_size: 128    # Note: Setting img_size overrides reduced_resolution
-    #img_size: 64
+    #img_size: 128    # Note: Setting img_size overrides reduced_resolution
+    img_size: 64
     #img_size: 32
 
     patch_size: 8
