@@ -397,7 +397,6 @@ def run_training(config, prefix):
 
             scheduler.step()
 
-
             #if(bn%100 == 0 and len(train_loader) >= 1000):
             #    print("Batch: {0}\tloss = {1:.4f}".format(bn, train_loss/(bn+1)))
             #    fig, ax = plt.subplots(ncols=3, nrows=2, figsize=(22,15))

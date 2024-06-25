@@ -6,7 +6,7 @@ args:
     results_dir: './new_large_diff_embed/'
 
     model: 'pitt' 
-    neural_operator: 'deeponet' # fno, oformer, deeponet
+    neural_operator: 'fno' # fno, oformer, deeponet
 
     embedding: 'standard'
     #embedding: 'novel'
@@ -15,8 +15,49 @@ args:
     #split_style: 'equation'
     split_style: 'initial_condition'
 
-    #train_style: 'next_step'
-    train_style: 'fixed_future'
+    train_style: 'next_step'
+    #train_style: 'fixed_future'
+    #
+    
+    ###
+    # Choose data set
+    ###
+    #dataset: 'shallow_water'
+    #dataset: 'diffusion_reaction'
+    #dataset: 'cfd_rand_0.1_0.01_0.01'
+    #dataset: 'cfd_rand_0.1_0.1_0.1'
+    #dataset: 'cfd_rand_0.1_1e-8_1e-8'
+    #dataset: 'cfd_rand_1.0_0.01_0.01'
+    #dataset: 'cfd_rand_1.0_0.1_0.1'
+    #dataset: 'cfd_rand_1.0_1e-8_1e-8'
+    #dataset: 'cfd_turb_0.1_1e-8_1e-8'
+    #dataset: 'cfd_turb_1.0_1e-8_1e-8'
+    dataset: 'all'
+
+    ###
+    # Choose embedding strategy
+    ###
+
+    clip: True
+    coeff: False       # Whether or not we use coefficient information
+    #coeff: True       # Whether or not we use coefficient information
+
+    # Whether or not we add boundary condition information into text description
+    #bcs: False
+    bcs: True
+
+    # Whether or not we incorporate qualitative information into text description. Can't use this without coefficient information
+    qualitative: False
+    #qualitative: True
+
+    # Whether or not we're returning sentences and training LLM end-to-end
+    sentence: False
+    #sentence: True
+    transfer: False
+
+    pretraining_loss: 'clip'
+    #pretraining_loss: 'weightedclip' # Or weightedclip or None
+    llm: 'None'
     
     attention_type: 'galerkin'
 
@@ -72,6 +113,18 @@ args:
     #num_samples: 100
     #num_samples: 370
     num_samples: 1000
+
+    # Pretraining optimizer
+    pretraining_num_samples: 0
+    #pretraining_num_samples: 10
+    #pretraining_num_samples: 100
+    #pretraining_num_samples: 1000
+    #pretraining_num_samples: 10000
+    #pretraining_epochs: 1
+    pretraining_epochs: 100
+    pretraining_learning_rate: 1.e-3
+    pretraining_weight_decay: 1.e-9
+    pretraining_training_type: single
     
     # For mixed next step training
     #samples_per_equation: 1

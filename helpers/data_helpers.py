@@ -13,7 +13,7 @@ def _get_filename_and_extension(config):
         extension = 'diffusion-reaction'
 
     ###
-    #  Various Incompressible Navier-Stokes Datasets
+    #  Various Compressible Navier-Stokes Datasets
     ###
     elif(config['dataset'] == 'cfd_rand_0.1_0.01_0.01'):
         filename = '2D_CFD_Rand_M0.1_Eta0.01_Zeta0.01_periodic_128_Train.hdf5'
@@ -46,6 +46,41 @@ def _get_filename_and_extension(config):
     elif(config['dataset'] == 'cfd_turb_1.0_1e-8_1e-8'):
         filename = '2D_CFD_Turb_M1.0_Eta1e-08_Zeta1e-08_periodic_512_Train.hdf5'
         extension = 'CFD/2D_Train_Turb'
+
+
+    ###
+    #  Various Inompressible Navier-Stokes Datasets
+    ###
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-0.h5'):
+        filename = 'ns_incom_inhom_2d_512-0.h5'
+        extension = 'NS_incom'
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-1.h5'):
+        filename = 'ns_incom_inhom_2d_512-1.h5'
+        extension = 'NS_incom'
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-2.h5'):
+        filename = 'ns_incom_inhom_2d_512-2.h5'
+        extension = 'NS_incom'
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-3.h5'):
+        filename = 'ns_incom_inhom_2d_512-3.h5'
+        extension = 'NS_incom'
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-4.h5'):
+        filename = 'ns_incom_inhom_2d_512-4.h5'
+        extension = 'NS_incom'
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-5.h5'):
+        filename = 'ns_incom_inhom_2d_512-5.h5'
+        extension = 'NS_incom'
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-6.h5'):
+        filename = 'ns_incom_inhom_2d_512-6.h5'
+        extension = 'NS_incom'
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-7.h5'):
+        filename = 'ns_incom_inhom_2d_512-7.h5'
+        extension = 'NS_incom'
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-8.h5'):
+        filename = 'ns_incom_inhom_2d_512-8.h5'
+        extension = 'NS_incom'
+    elif(config['dataset'] == 'ns_incom_inhom_2d_512-9.h5'):
+        filename = 'ns_incom_inhom_2d_512-9.h5'
+        extension = 'NS_incom'
 
     # Combine all of the data sets
     elif(config['dataset'] == 'all'):

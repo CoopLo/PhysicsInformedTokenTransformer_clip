@@ -26,7 +26,7 @@ from models.deeponet import DeepONet2D
 from models.fno import FNO2d
 from models.transolver import EmbeddingTransolver
 
-from helpers import get_data
+from helpers import get_data, get_transformer, get_loss, as_rollout, ar_rollout
 from metrics import metric_func
 
 import sys
@@ -34,23 +34,6 @@ import sys
 device = 'cuda' if(torch.cuda.is_available()) else 'cpu'
 
 DEBUG = True
-
-def custom_collate(batch):
-    x0 = torch.empty((len(batch), batch[0][0].shape[0]))
-    y = torch.empty((len(batch), batch[0][1].shape[0], 1))
-    grid = torch.empty((len(batch), batch[0][2].shape[0]))
-    tokens = torch.empty((len(batch), batch[0][3].shape[0]))
-    forcing = []
-    time = torch.empty(len(batch))
-    for idx, b in enumerate(batch):
-        x0[idx] = b[0]
-        y[idx] = b[1]
-        grid[idx] = b[2]
-        tokens[idx] = b[3]
-        forcing.append(b[4])
-        time[idx] = b[5]
-    return x0, y, grid, tokens, forcing, time
-
 
 def progress_plots(ep, y_train_true, y_train_pred, y_val_true, y_val_pred, path="progress_plots", seed=None, subset=None):
     ncols = 4
@@ -233,84 +216,6 @@ def new_get_data(config, pretraining=False, subset='heat,adv,burger'):
     return train_loader, val_loader, test_loader
 
 
-def get_transformer(model_name, config):
-    # Channels based on initial steps
-    channels = config['initial_step']
-
-    # Multiply by number of target variables
-    channels *= 1 if(config['dataset'] == 'shallow_water') else 2 if(config['dataset'] == 'diffusion_reaction') else 4
-
-    # Add 2 for grid
-    channels += 2
-
-    # Add more for coefficients
-    channels += 5 if(config['coeff']) else 0
-
-    # Add time channel if doing arbitraty_step training
-    channels += 1 if(config['train_style'] == 'arbitrary_step') else 0
-
-    # Out channels is number of target variables, only doing single step prediction for now
-    out_channels = 1 if(config['dataset'] == 'shallow_water') else 2 if(config['dataset'] == 'diffusion_reaction') else 4
-
-    # Create the transformer model.
-    if(config['sentence']):
-        print("USING SENTENCE CLIP VISION TRANSFORMER WITH: {}\n".format(config['llm']))
-        transformer = LLMCLIPViT(
-                   image_size=config['img_size'],
-                   patch_size=config['patch_size'],
-                   dim=config['dim'],
-                   depth=config['depth'],
-                   heads=config['heads'],
-                   mlp_dim=config['mlp_dim'],
-                   pool=config['pool'],
-                   channels=channels,
-                   out_channels=out_channels,
-                   dim_head=config['dim_head'],
-                   dropout=config['dropout'],
-                   emb_dropout=config['emb_dropout'],
-                   llm=config['llm'],
-        ).to(device)
-
-    elif(model_name == 'vit'):
-        print("USING CLIP VISION TRANSFORMER WITH: {}\n".format(config['llm']))
-        transformer = CLIPViT(
-                   image_size=config['img_size'],
-                   patch_size=config['patch_size'],
-                   dim=config['dim'],
-                   depth=config['depth'],
-                   heads=config['heads'],
-                   mlp_dim=config['mlp_dim'],
-                   pool=config['pool'],
-                   channels=channels,
-                   out_channels=out_channels,
-                   dim_head=config['dim_head'],
-                   dropout=config['dropout'],
-                   emb_dropout=config['emb_dropout'],
-                   llm=config['llm'],
-        ).to(device)
-
-#    elif(model_name == 'transolver'):
-#        transformer = EmbeddingTransolver(
-#                space_dim=channels-2, # Spatial - grid dimensions
-#                fun_dim=2,            # grid dimension
-#                llm=config['llm']
-#        ).to(device)
-    elif(model_name == 'transolver'):
-        transformer = EmbeddingTransolver(
-                space_dim=channels-2,      # Spatial - grid dimensions
-                fun_dim=2,                 # grid dimension
-                out_dim = out_channels,    # Number of output channels varies based on dataset
-                H=config['img_size'],
-                W=config['img_size'],
-                llm=config['llm'],
-        ).to(device)
-
-
-    else:
-        raise ValueError("Invalid model choice.")
-    return transformer
-
-
 def get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn, times=None):
     # Select data for input and target
     if(config['train_style'] == 'next_step'):
@@ -435,7 +340,7 @@ def save_embeddings(config, path, transformer, loader, train=True, seed=0):
     np.save("./{}/pretraining_{}_sim_mats_{}.npy".format(path, split, seed), all_sim_mats.cpu().numpy())
 
 
-def run_pretraining(config, prefix):
+def run_pretraining(config, prefix, model="vit"):
     path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
     pretrained_path = "{}{}/{}".format(config['pretrained_model_path'], config['pretraining_num_samples'],
                                        prefix)
@@ -445,7 +350,7 @@ def run_pretraining(config, prefix):
     pretrained_model_path = pretrained_path + "/" + model_name
 
     # Create the transformer model.
-    transformer = get_transformer('vit', config)
+    transformer = get_transformer(model, config)
     if(config['pretraining_num_samples'] == 0):
         print("\nNO PRETRAINING\n")
         return transformer, None
@@ -556,81 +461,6 @@ def run_pretraining(config, prefix):
     return transformer, pretrained_model_path
 
 
-def get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn, times=None, evaluate=False):
-
-    # Select data for input and target
-    if(config['train_style'] == 'next_step'):
-        steps = torch.Tensor(np.random.choice(range(config['initial_step'], config['sim_time']), x0.shape[0])).long()
-        #steps = torch.Tensor(np.random.choice(range(config['initial_step'], len(times)), x0.shape[0])).long()
-        try:
-            y = torch.cat([x0[idx,:,:,i][None] for idx, i in enumerate(steps)], dim=0)
-            #x0 = torch.cat([x0[idx,:,:,i-config['initial_step']:i][None] for idx, i in enumerate(steps)], dim=0)[...,0,:]
-            x0 = torch.cat([x0[idx,:,:,i-config['initial_step']:i][None] for idx, i in enumerate(steps)], dim=0).flatten(3,4)
-        except IndexError:
-            print(steps)
-            print(x0.shape)
-            raise
-
-    elif(config['train_style'] == 'fixed_future'):
-        y = x0[:, config['sim_time']].unsqueeze(-1)
-        x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
-    elif(config['train_style'] == 'arbitrary_step'):
-        # Generate random slices
-        steps = torch.Tensor(np.random.choice(range(config['initial_step'], config['sim_time']+1),
-                             x0.shape[0])).long()
-        y = torch.cat([x0[idx,i][None,None] for idx, i in enumerate(steps)], dim=0)
-        t = torch.cat([times[i][None] for idx, i in enumerate(steps)], dim=0)
-    
-        # Use initial condition and stack target time
-        x0 = x0[:,:config['initial_step']]
-        if(times is None):
-            raise ValueError("Need target times to stack with data.")
-        x0 = torch.cat((x0, t[:,None,None,None].broadcast_to(x0.shape[0], 1, x0.shape[2], x0.shape[3])), axis=1)
-
-        # Reorder dimensions
-        y = y.permute(0,2,3,1)
-        x0 = x0.permute(0,2,3,1) if(len(x0.shape) == 4) else x0.unsqueeze(-1)
-
-
-    # Put data on correct device
-    x0 = x0.to(device).float()
-    y = y.to(device).float()
-    grid = grid.to(device).float()
-
-    if(config['coeff']): # Stack coefficients
-        nu = coeffs['nu'].unsqueeze(-1)
-        ax = coeffs['ax'].unsqueeze(-1)
-        ay = coeffs['ay'].unsqueeze(-1)
-        cx = coeffs['cx'].unsqueeze(-1)
-        cy = coeffs['cy'].unsqueeze(-1)
-        coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],
-                                                                                               x0.shape[2], 5)
-        inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
-    else:
-        inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
-
-    if(isinstance(transformer, EmbeddingTransolver)):
-        y_pred = transformer(grid, x0, sentence_embeddings)
-    else:
-        y_pred = transformer(inp, sentence_embeddings)[...,0].permute(0,2,3,1)
-
-    y = y.to(device=device)
-
-    # Compute the loss.
-    if(evaluate):
-        ch0 = not((y[...,-1,0] == 0).all())
-        ch1 = not((y[...,-1,1] == 0).all())
-        ch2 = not((y[...,-1,2] == 0).all())
-        ch3 = not((y[...,-1,3] == 0).all())
-        chans = [ch0, ch1, ch2, ch3]
-        err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = metric_func(y_pred[...,chans], y[...,chans], if_mean=True,
-                                                                           Lx=1., Ly=1., Lz=1.)
-        return y_pred, y, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F
-    else:
-        loss = loss_fn(y_pred, y)
-        return y_pred, y, loss
-
-
 def evaluate(test_loader, transformer, loss_fn, config=None):
     #src_mask = generate_square_subsequent_mask(640).cuda()
     metrics = {'RMSE': [], 'nRMSE': [], 'CSV': [], 'Max': [], 'BD': [], 'F': []}
@@ -641,12 +471,12 @@ def evaluate(test_loader, transformer, loss_fn, config=None):
             # Forward pass: compute predictions by passing the input sequence
             # through the transformer.
             #y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn, times=test_loader.dataset.tsteps_t)
-            y_pred, y, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
+            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
                                                                                        sentence_embeddings, loss_fn,
-                                                                                       times=test_loader.dataset.tsteps_t,
+                                                                                       times=test_loader.dataset.dt,
                                                                                        evaluate=True)
-            #test_loss += loss.item()
-            test_loss += err_nRMSE.item()
+            test_loss += loss.item()
+            #test_loss += err_nRMSE.item()
 
             metrics['RMSE'].append(err_RMSE)
             metrics['nRMSE'].append(err_nRMSE)
@@ -670,12 +500,12 @@ def zero_shot_evaluate(transformer, config, seed, prefix, subset='Heat,Burger,Ad
         for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(test_loader):
             #y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
             #                           times=test_loader.dataset.tsteps_t, evaluate=True)
-            y_pred, y, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
+            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
                                                                                        sentence_embeddings, loss_fn,
-                                                                                       times=test_loader.dataset.tsteps_t,
+                                                                                       times=test_loader.dataset.dt,
                                                                                        evaluate=True)
-            #test_loss += loss.item()
-            test_loss += err_nRMSE.item()
+            test_loss += loss.item()
+            #test_loss += err_nRMSE.item()
 
             metrics['RMSE'].append(err_RMSE)
             metrics['nRMSE'].append(err_nRMSE)
@@ -691,176 +521,6 @@ def zero_shot_evaluate(transformer, config, seed, prefix, subset='Heat,Burger,Ad
         np.save("./{}/zero_shot/zero_schot_test_vals_{}.npy".format(path, seed), test_loss/(bn+1))
         np.save("./{}/zero_shot/zero_schot_metrics_{}.npy".format(path, seed), metrics)
     return test_loss/(bn+1)
-
-
-def as_rollout(test_loader, transformer, loss_fn, config, prefix, subset):
-    all_y_preds, all_y_trues = [], []
-    with torch.no_grad():
-        transformer.eval()
-        test_loss = 0
-
-        # TODO: Loop over dataset not data loader
-        #for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(test_loader):
-        #for idx in tqdm(range(test_loader.dataset.u.shape[0])):
-        for original_idx, idx in tqdm(enumerate(test_loader.dataset.indexes)):
-
-            # Get steps for the entire trajectory
-            steps = torch.Tensor([i for i in range(config['initial_step'], config['sim_time']+1)]).long()
-
-            # Get data from single trajectory
-            x0 = test_loader.dataset.u[idx].unsqueeze(0)
-            grid = test_loader.dataset.x.repeat(len(steps), 1, 1, 1)
-
-            # Need every slice but the first...
-            y = torch.cat([x0[:,i][None] for idx, i in enumerate(steps)], dim=0).permute(0,2,3,1)
-
-            # Need the initial step as many times as it takes to match the rest of the trajectory
-            x0 = x0[:,:config['initial_step']].repeat(len(steps), 1, 1, 1)
-            t = test_loader.dataset.t[config['initial_step']:]
-
-            # Put data on correct device
-            x0 = x0.to(device).float()
-            y = y.to(device).float()
-            grid = grid.to(device).float()
-
-            # Stack target time
-            x0 = torch.cat((x0, t[:,None,None,None].broadcast_to(x0.shape[0], 1, x0.shape[2], x0.shape[3])), axis=1)
-
-            if(config['coeff']): # Stack coefficients
-                nu = test_loader.dataset.nu[idx].unsqueeze(-1)
-                ax = test_loader.dataset.ax[idx].unsqueeze(-1)
-                ay = test_loader.dataset.ay[idx].unsqueeze(-1)
-                cx = test_loader.dataset.cx[idx].unsqueeze(-1)
-                cy = test_loader.dataset.cy[idx].unsqueeze(-1)
-
-                coeff = torch.cat((nu,ax,ay,cx,cy), dim=0)[None,:,None,None].broadcast_to(x0.shape[0], 5, x0.shape[2], x0.shape[3])
-
-                inp = torch.cat((x0, grid, coeff), dim=1)
-            else:
-                inp = torch.cat((x0, grid), dim=1)
-
-            # Make prediction
-            y_pred = transformer(inp)
-
-            # Save data and pred
-            all_y_preds.append(y_pred.unsqueeze(0))
-            all_y_trues.append(y.unsqueeze(0))
-
-    # Stack predictions and ground truth
-    all_y_preds = torch.cat(all_y_preds, dim=0)
-    all_y_trues = torch.cat(all_y_trues, dim=0)
-
-    # Now in shape traj x time x space x channels
-    mse = ((all_y_preds - all_y_trues)**2).mean(dim=(0,2))
-
-    # Save relevant info
-    #path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'],
-    #                           config['pretraining_num_samples'], prefix)
-    path = "{}{}/{}".format(config['results_dir'], config['num_samples'], prefix)
-
-    if(subset != 'heat,adv,burger'):
-        torch.save(mse, path+"/{}_{}_rollout_mse".format(seed, subset))
-        torch.save(all_y_trues.cpu(), path+"/{}_{}_y_trues".format(seed, subset))
-        torch.save(all_y_preds.cpu(), path+"/{}_{}_y_preds".format(seed, subset))
-    else:
-        torch.save(mse, path+"/{}_rollout_mse".format(seed))
-        torch.save(all_y_trues.cpu(), path+"/{}_all_y_trues".format(seed))
-        torch.save(all_y_preds.cpu(), path+"/{}_all_y_preds".format(seed))
-    return test_loss/(idx+1)
-
-
-def ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset):
-    all_y_preds, all_y_trues = [], []
-    with torch.no_grad():
-        transformer.eval()
-        test_loss = 0
-
-        # TODO: Loop over dataset not data loader
-        print("Autoregressive rollout...")
-        for idx in tqdm(range(test_loader.dataset.data.shape[0])):
-            x0 = test_loader.dataset.data[idx][...,:config['initial_step'],:].unsqueeze(0).flatten(3,4)
-            y = test_loader.dataset.data[idx][...,config['initial_step']:,:].unsqueeze(0)
-
-            # Grid changes based on multi or single dataset.
-            if(isinstance(test_loader.dataset, MultiDataset)):
-                #TODO: This no longer supports unevenly sized data sets
-                sample_idx = idx%(int(0.1*config['num_samples']))
-                dset_idx = idx//int((0.1*config['num_samples']))
-
-                #grid = test_loader.dataset.grids[idx//config['num_samples']].unsqueeze(0)
-
-                grid = test_loader.dataset.grids[dset_idx].unsqueeze(0)
-                sentence_embeddings = torch.Tensor(test_loader.dataset.dsets[dset_idx].sentence_embeddings[sample_idx]).unsqueeze(0)
-            else:
-                grid = test_loader.dataset.grid.unsqueeze(0)
-                sentence_embeddings = test_loader.dataset.sentence_embeddings[idx].unsqueeze(0)
-
-            if(len(x0.shape) == 5):
-                x0 = x0[...,0,:]
-
-            y_preds = []
-            #print("\nY SHAPE: {}\n".format(y.shape))
-            for i in range(y.shape[-2]):
-                #print("STEP: {}".format(i))
-
-                if(config['coeff']): # Stack coefficients
-                    nu = test_loader.dataset.nu[idx].unsqueeze(-1)
-                    ax = test_loader.dataset.ax[idx].unsqueeze(-1)
-                    ay = test_loader.dataset.ay[idx].unsqueeze(-1)
-                    cx = test_loader.dataset.cx[idx].unsqueeze(-1)
-                    cy = test_loader.dataset.cy[idx].unsqueeze(-1)
-
-                    coeff = torch.cat((nu,ax,ay,cx,cy), dim=0)[None,:,None,None].broadcast_to(x0.shape[0], 5,
-                                                                                              x0.shape[2], x0.shape[3])
-
-                    inp = torch.cat((x0, grid, coeff), dim=1)
-                else:
-                    inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2).cuda()
-
-                #y_pred = transformer(inp, sentence_embeddings).permute(0,4,2,3,1)[0]
-
-                ## Stack and slice on input
-                ##x0 = torch.cat((x0, y_pred), dim=0)[config['initial_step']:]
-
-                ## Take number of data channels and subtract grid channels
-                #x0 = torch.cat((x0, y_pred), dim=-1)[...,-transformer.channels+2:]
-                #raise
-                # Make prediction
-                if(isinstance(transformer, EmbeddingTransolver)):
-                    y_pred = transformer(grid, x0, sentence_embeddings)
-                    x0 = torch.cat((x0, y_pred), dim=-1)[...,-transformer.space_dim:]
-                else:
-                    y_pred = transformer(inp).permute(0,4,2,3,1)[0]
-                    x0 = torch.cat((x0, y_pred), dim=-1)[...,-transformer.channels+2:]
-
-                # Save preds
-                y_preds.append(y_pred.unsqueeze(0))
-
-            # Save data and preds
-            all_y_preds.append(torch.cat(y_preds, dim=1))
-            all_y_trues.append(y)
-
-    # Stack predictions and ground truth
-    all_y_preds = torch.cat(all_y_preds, dim=0).permute(0,2,3,1,4)
-    all_y_trues = torch.cat(all_y_trues, dim=0)
-
-    # Now in shape traj x time x space x channels
-    mse = ((all_y_preds - all_y_trues)**2).mean(dim=(0,2))
-
-    # Save relevant info
-    #path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'],
-    #                           config['pretraining_num_samples'], prefix)
-    path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
-
-    if(subset != 'heat,adv,burger'):
-        torch.save(mse, path+"/rollouts/{}_{}_rollout_mse".format(seed, subset))
-        torch.save(all_y_trues.cpu(), path+"/rollouts/{}_{}_y_trues".format(seed, subset))
-        torch.save(all_y_preds.cpu(), path+"/rollouts/{}_{}_y_preds".format(seed, subset))
-    else:
-        torch.save(mse, path+"/rollouts/{}_rollout_mse".format(seed))
-        torch.save(all_y_trues.cpu(), path+"/rollouts/{}_all_y_trues".format(seed))
-        torch.save(all_y_preds.cpu(), path+"/rollouts/{}_all_y_preds".format(seed))
-    return test_loss/(idx+1)
 
 
 def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
@@ -910,7 +570,7 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
         for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(train_loader):
             start = time.time()
             y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
-                                       times=train_loader.dataset.tsteps_t)
+                                       times=train_loader.dataset.dt)
 
             # Backward pass: compute gradient of the loss with respect to model
             optimizer.zero_grad()
@@ -938,7 +598,7 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
                 for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(val_loader):
                     # Forward pass: compute predictions by passing the input sequence
                     y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
-                                               times=train_loader.dataset.tsteps_t)
+                                               times=train_loader.dataset.dt)
                     all_val_preds.append(y_pred.detach())
 
                     val_loss += loss.item()
@@ -996,10 +656,10 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
         np.save("./{}/metrics/best_metric_{}.npy".format(path, seed), best_metric)
 
     if(config['train_style'] == 'arbitrary_step'):
-        as_rollout(test_loader, transformer, loss_fn, config, prefix, subset)
+        as_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=seed)
     elif(config['train_style'] == 'next_step'):
         print("\nPREFIX: {}\n".format(prefix))
-        ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset)
+        ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=seed)
 
     return model_path
 
@@ -1010,15 +670,17 @@ if __name__ == '__main__':
 
     # Load config
     #raise
-    #with open("./configs/2d_vit_config.yaml", 'r') as stream:
-    #with open("./configs/lucidrains_2d_vit_config.yaml", 'r') as stream:
-    #    config = yaml.safe_load(stream)
-    if(sys.argv[1] == 'transolver'):
+    if(len(sys.argv) == 1):
+        raise ValueError("Select one of vit, transovler, or pitt.")
+    elif(sys.argv[1] == 'transolver'):
         model_name = 'transolver'
         config_name = "transolver_2d_config.yaml"
     elif(sys.argv[1] == 'vit'):
         model_name = 'vit'
         config_name = "lucidrains_2d_vit_config.yaml"
+    elif(sys.argv[1] == 'pitt'):
+        model_name = 'pitt'
+        config_name = "pitt_2d_config.yaml"
     else:
         print("Using ViT by default.")
         model_name = 'vit'
@@ -1037,22 +699,16 @@ if __name__ == '__main__':
     prefix += "_transfer" if(train_args['transfer']) else ""
     prefix += "_sentence" if(train_args['sentence']) else ""
     prefix += "_qualitative" if(train_args['qualitative']) else ""
+    prefix += "_DEBUG" if(train_args['DEBUG']) else ""
+
     train_args['prefix'] = prefix
 
     if(train_args['dataset'] == 'all'):
         train_args['sim_time'] = 21
 
     # Loop over number of samples TODO: ns = -1 is not supported in autoregressive rollout
-    #for ns in [50, 100, 500, 1000]:
-    #for ns in [10]:
     for ns in [10, 20, 50, 100]:
-    #for ns in [20, 50, 100, 500, 1000]:
 
-    #for ns in [10, 20, 50, 100, 500, 1000]:
-    #for ns in [50, 100, 500, 1000]:
-    #for ns in [100, 500, 1000]:
-    #for ns in [10, 20, 50, 100]:
-    #for ns in [500, 1000]:
         train_args['num_samples'] = ns
         train_args['num_data_samples'] = ns
 
@@ -1085,7 +741,13 @@ if __name__ == '__main__':
             train_args['seed'] = seed
 
             # Will run pretraining if num_pretraining_samples > 0
-            model, pretrained_model_path = run_pretraining(train_args, prefix)
+            print("\n\nMODEL NAME: {}\n\n".format(model_name))
+
+            if(train_args['DEBUG']):
+                pretrained_model_path = None
+            else:
+                model, pretrained_model_path = run_pretraining(train_args, prefix, model=model_name)
+                print("\n\nPRETRIANED MODEL PATH: {}\n\n".format(pretrained_model_path))
 
             torch.manual_seed(seed)
             np.random.seed(seed)
@@ -1095,7 +757,8 @@ if __name__ == '__main__':
 
             # Train on combined dataset
             train_args['dataset'] = 'all'
-            transfer_model_path = run_training(model, train_args, prefix, seed, subset=train_args['dataset'])
+            if(not train_args['DEBUG']):
+                transfer_model_path = run_training(model, train_args, prefix, seed, subset=train_args['dataset'])
             #if(train_args['transfer'] and train_args['dataset'] == 'all'):
             #    transfer_model_path = model_path
 
@@ -1107,14 +770,19 @@ if __name__ == '__main__':
             #TODO: adjust this for the PDEBench data sets
 
             #if(train_args['transfer']):
+            #for subset in ['diffusion_reaction', 'cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
+            #for subset in ['cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
             for subset in ['shallow_water', 'diffusion_reaction', 'cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
                            'cfd_rand_0.1_1e-8_1e-8', 'cfd_rand_1.0_0.01_0.01', 'cfd_rand_1.0_0.1_0.1', 'cfd_rand_1.0_1e-8_1e-8',
                            'cfd_turb_0.1_1e-8_1e-8', 'cfd_turb_1.0_1e-8_1e-8']:
 
-                train_args['num_data_samples'] = 10*ns
-
-                print("\nDATA: {}\n".format(subset))
-                train_args['dataset'] = subset
+                if(train_args['DEBUG']):
+                    train_args['dataset'] = 'cfd_rand_0.1_0.01_0.01'
+                    train_args['num_data_samples'] = 10*ns
+                else:
+                    train_args['num_data_samples'] = 10*ns
+                    print("\nDATA: {}\n".format(subset))
+                    train_args['dataset'] = subset
 
                 ###
                 #  Either load from transfer learning path (standard training on combined data set) or from pretrained path
@@ -1123,7 +791,7 @@ if __name__ == '__main__':
                 if(train_args['transfer']):
                     print("\nTRANSFER LEARNING FROM: {}\n".format(transfer_model_path))
                     model.load_state_dict(torch.load(transfer_model_path)['model_state_dict'])
-                else:
+                elif(pretrained_model_path is not None):
                     print("\nFINE TUNING FROM: {}\n".format(pretrained_model_path))
                     model.load_state_dict(torch.load(pretrained_model_path)['model_state_dict'])
 
@@ -1132,4 +800,7 @@ if __name__ == '__main__':
 
                 print("\nFINE TUNING ON INDIVIDUAL DATA SET\n")
                 model_path = run_training(model, train_args, prefix, seed, subset=train_args['dataset'])
+
+                if(train_args['DEBUG']):
+                    break
 

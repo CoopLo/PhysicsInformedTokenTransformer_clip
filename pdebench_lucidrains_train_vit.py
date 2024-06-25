@@ -269,6 +269,7 @@ def get_transformer(model_name, config):
                 H=config['img_size'],
                 W=config['img_size'],
                 n_layers=config['depth'],
+                n_hidden=config["dim"],
         ).to(device)
 
     else:
@@ -726,6 +727,9 @@ if __name__ == '__main__':
     elif(sys.argv[1] == 'vit'):
         model_name = 'vit'
         config_name = "lucidrains_2d_vit_config.yaml"
+    elif(sys.argv[1] == 'dpot'):
+        model_name = 'dpot'
+        config_name = "dpot_2d_config.yaml"
     else:
         print("Using ViT by default.")
         model_name = 'vit'
@@ -749,21 +753,7 @@ if __name__ == '__main__':
     train_args['sentence'] = False
 
     # Loop over number of samples TODO: ns = -1 is not supported in autoregressive rollout
-    #for ns in [50, 100, 500, 1000]:
-    #for ns in [50]:
-
-    #for ns in [10, 20, 50, 100]:
-    for ns in [50, 100, 200, 500, 1000]:
-        
-    #for ns in [20, 50, 100, 500, 1000]:
-
-    #for ns in [10, 20, 50, 100, 500, 1000]:
-    #for ns in [20, 50, 100, 500, 1000]:
-    #for ns in [20]:#, 50, 100, 500, 1000]:
-    #for ns in [50, 100, 500, 1000]:
-    #for ns in [100]:
-    #for ns in [100, 200, 500, 1000]:
-    #for ns in [500, 1000]:
+    for ns in [10, 20, 50, 100]:
         train_args['num_samples'] = ns
         train_args['num_data_samples'] = ns
 

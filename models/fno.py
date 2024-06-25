@@ -211,7 +211,8 @@ class FNO2d(nn.Module):
         self.modes1 = modes1
         self.modes2 = modes2
         self.width = width
-        self.padding = 2 # pad the domain if input is non-periodic
+        self.padding = 1 # pad the domain if input is non-periodic
+        self.channels = num_channels*initial_step
         self.fc0 = nn.Linear(initial_step*num_channels+2, self.width)
         # input channel is 12: the solution of the previous 10 timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
 
@@ -266,7 +267,7 @@ class FNO2d(nn.Module):
         x = self.dropout(x)
         x = self.fc2(x)
         
-        return x.unsqueeze(-2)
+        return x
 
 
     def get_loss(self, x, y, grid, loss_fn):

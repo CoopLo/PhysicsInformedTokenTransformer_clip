@@ -427,6 +427,9 @@ class FNODatasetSingle(Dataset):
         # Time steps used as initial conditions
         self.initial_step = initial_step
         self.data = self.data if torch.is_tensor(self.data) else torch.tensor(self.data)
+        self.tsteps_t = torch.tensor(self.tsteps_t)
+
+        self.dt = self.tsteps_t[1] - self.tsteps_t[0] * torch.ones(len(self.tsteps_t)).unsqueeze(0)
 
         # Need to add empty data channels when doing transfer learning because base model has 4
         ds = self.data.shape
@@ -511,9 +514,10 @@ class FNODatasetSingle(Dataset):
 
                 if(self.coeff):
                     split_fname = self.filename.split("_")
-                    sentence += "In this case, the mach number is {}, ".format(float(split_fname[2]))
-                    sentence += "the shear viscosity is {}, ".format(float(split_name[3]))
-                    sentence += "and the bulk viscosity is {}.".format(float(split_name[4]))
+                    #print(split_fname)
+                    sentence += "In this case, the mach number is {}, ".format(float(split_fname[3][1:]))
+                    sentence += "the shear viscosity is {}, ".format(float(split_fname[4][3:]))
+                    sentence += "and the bulk viscosity is {}.".format(float(split_fname[5][4:]))
                 if(self.qualitative):
                     if("Rand" in self.saved_folder):
                         sentence += " A random field is the initial condition, which is not turbulent."
@@ -543,9 +547,9 @@ class FNODatasetSingle(Dataset):
         #TODO: Different training strategies, currently...?
         #return self.data[idx,...,:self.initial_step,:], self.data[idx], self.grid
         if(self.sentence or self.clip):
-            return self.data[idx], self.grid, -99999., self.sentence_embeddings[idx] # Grid is constant
+            return self.data[idx], self.grid, self.dt[0], self.sentence_embeddings[idx] # Grid is constant
         else:
-            return self.data[idx], self.grid, -99999. # Grid is constant
+            return self.data[idx], self.grid, self.dt[0] # Grid is constant
 
 
 class FNODatasetMult(Dataset):
@@ -652,8 +656,8 @@ class MultiDataset(Dataset):
                  normalize = False,
                  ):
 
-        self.dsets = []
-        self.data, self.grids = [], []
+        #self.dsets = []
+        self.dsets, self.data, self.grids, self.dt = [], [], [], []
 
         self.clip = clip
         self.sentence = sentence
@@ -711,9 +715,12 @@ class MultiDataset(Dataset):
             else:
                 self.grids.append(self.dsets[-1].grid.unsqueeze(0))
 
-        self.tsteps_t = None # May need to adjust later for arbitrary_step training
+            self.dt.append(self.dsets[-1].dt[:,:21])
+
+        self.dt = torch.cat(self.dt, dim=0).cuda()
         self.data = torch.cat(self.data, dim=0).cuda()
         self.grids = torch.cat(self.grids, dim=0).cuda()
+        print(self.dt.shape, self.data.shape, self.grids.shape)
 
 
     def __len__(self):
@@ -724,6 +731,6 @@ class MultiDataset(Dataset):
         dset_idx = idx%len(self.dsets)
         sample_idx = idx//len(self.dsets)
         if(self.clip or self.sentence):
-            return self.data[idx], self.grids[dset_idx], 99999., self.dsets[dset_idx].sentence_embeddings[sample_idx]
+            return self.data[idx], self.grids[dset_idx], self.dt[dset_idx], self.dsets[dset_idx].sentence_embeddings[sample_idx]
         else:
-            return self.data[idx], self.grids[dset_idx], 99999.
+            return self.data[idx], self.grids[dset_idx], self.dt[dset_idx]

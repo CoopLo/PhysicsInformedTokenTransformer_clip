@@ -877,7 +877,8 @@ class PhysicsInformedTokenTransformer2D(nn.Module):
 
 
 class StandardPhysicsInformedTokenTransformer2D(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, num_heads, output_dim1, output_dim2, neural_operator, dropout=0.1):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_heads, output_dim1, output_dim2, neural_operator, dropout=0.1,
+                 data_channels=1):
         super().__init__()
 
         self.temp = nn.Linear(100, 100, bias=False)
@@ -885,12 +886,15 @@ class StandardPhysicsInformedTokenTransformer2D(nn.Module):
         self.output_dim1 = output_dim1
         self.output_dim2 = output_dim2
         self.hidden_dim = hidden_dim
+        self.data_channels = data_channels
 
         self.embedding = torch.nn.Embedding(100, hidden_dim)
         self.pos_encoding = PositionalEncoding(hidden_dim, dropout)
 
+        self.norm = nn.LayerNorm((output_dim1, output_dim2, 5*data_channels))
+
         # Get input processing
-        self.k_embedding_layer = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.k_embedding_layer = nn.Linear(768, 100)
         self.embedding_layer1 = nn.Linear(1, hidden_dim, bias=False)
         self.embedding_layer2 = nn.Linear(1, hidden_dim, bias=False)
         self.embedding_layer3 = nn.Linear(1, hidden_dim, bias=False)
@@ -901,8 +905,9 @@ class StandardPhysicsInformedTokenTransformer2D(nn.Module):
         # Query and value processing
         self.q_embedding_layer = nn.Linear(1, hidden_dim, bias=False)
         self.v_embedding_layer = nn.Linear(1, hidden_dim, bias=False)
-        self.vh_embedding_layer = nn.Linear(output_dim1*output_dim2, 100, bias=False)
-        self.vh_unembedding_layer = nn.Linear(100, output_dim1*output_dim2, bias=False)
+        #self.vh_embedding_layer = nn.Linear(output_dim1*output_dim2, 100, bias=False)
+        self.vh_embedding_layer = nn.Linear(output_dim1*output_dim2*self.data_channels, 100, bias=False)
+        self.vh_unembedding_layer = nn.Linear(100, output_dim1*output_dim2*self.data_channels, bias=False)
 
         self.output_layer = nn.Linear(hidden_dim, output_dim1)
 
@@ -976,53 +981,80 @@ class StandardPhysicsInformedTokenTransformer2D(nn.Module):
     def forward(self, queries, keys, values, t):#, mask):
 
         # Physics Model Forward
-        if(isinstance(self.neural_operator, DeepONet2D)):
-            x = self.neural_operator(values, queries)
-        else:
-            #x = self.neural_operator(values.flatten(1,2), queries.flatten(1,2))
-            if(isinstance(self.neural_operator, FNO2d)):
-                x = self.neural_operator(values, queries)
-            else:
-                x = self.neural_operator(values, queries)
-                #x = self.neural_operator(values.flatten(1,2), queries.flatten(1,2))
-        x = x.reshape(x.shape[0], self.output_dim1, self.output_dim2)
+        #print()
+        #print(self.neural_operator)
+        #print()
+        #print()
+        #print(queries.shape, keys.shape, values.shape)
+        #print()
+        #print()
+        #print(self.norm)
+        #print(values.shape)
+
+        #values = self.norm(values)
+        x = self.neural_operator(values, queries)
+
+        #if(isinstance(self.neural_operator, DeepONet2D)):
+        #    x = self.neural_operator(values, queries)
+        #else:
+        #    #x = self.neural_operator(values.flatten(1,2), queries.flatten(1,2))
+        #    if(isinstance(self.neural_operator, FNO2d)):
+        #        x = self.neural_operator(values, queries)
+        #    else:
+        #        x = self.neural_operator(values, queries)
+        #        #x = self.neural_operator(values.flatten(1,2), queries.flatten(1,2))
+        #print("AFTER NEURAL OPERATOR: {}".format(x.shape))
+        #x = x.reshape(x.shape[0], self.output_dim1, self.output_dim2)
 
         # Get difference between physics model output and input
-        dx = x - values[...,-1]
+        #print(x.shape, values.shape)
+        #print("DATA CHANNELS: {}".format(self.data_channels))
+        #print(x.shape, values[...,-self.data_channels:].shape)
+        dx = x - values[...,-self.data_channels:]
         dx = dx.unsqueeze(-1)
 
-        # Embedding
-        #print(keys.shape)
-        keys = self.embedding(keys.long()) * np.sqrt(self.hidden_dim)
-        keys = self.pos_encoding(keys)
+        # Embedding -> Redo since we're using an LLM
+        #print("SHAPE OF KEYS: {}".format(keys.shape))
+        ###keys = self.k_embedding_layer(keys)
+        ###keys = self.embedding(keys.long()) * np.sqrt(self.hidden_dim)
+        ###keys = self.pos_encoding(keys)
+
+        kh1 = self.k_embedding_layer(keys)
+        kh1 = self.embedding(kh1.long()) * np.sqrt(self.hidden_dim)
+        kh1 = self.pos_encoding(kh1)
+
+        #print("SHAPE OF KEYS AFTER POS ENCODING: {}".format(keys.shape))
 
         ## Scale and shift the keys
         #keys = (keys - keys.max())/keys.max()
 
-        ## Keys
-        kh1 = keys.clone()
-        kh2 = keys.clone()
-        kh3 = keys.clone()
+        ## Keys -> skip since we're using an LLM
+        ##kh1 = keys.clone()
+        ##kh2 = keys.clone()
+        ##kh3 = keys.clone()
 
-        # Process equation
-        for l in range(1):
+        # Process equation -> skip this since we're using an LLM
+        ###for l in range(1):
 
-            # Attention on just equation tokens
-            ah, _ = self.mhls[l](kh1, kh2, kh3)
-            #return _
-            ah = self.dropout(ah)
+        ###    # Attention on just equation tokens
+        ###    ah, _ = self.mhls[l](kh1, kh2, kh3)
+        ###    #return _
+        ###    ah = self.dropout(ah)
 
-            # Copy hidden state to input for next layer
-            kh1 = ah.clone()
-            kh2 = ah.clone()
-            kh3 = ah.clone()
+        ###    # Copy hidden state to input for next layer
+        ###    kh1 = ah.clone()
+        ###    kh2 = ah.clone()
+        ###    kh3 = ah.clone()
 
+        #print("KEY SHAPE AFTER ATTENTION: {}".format(kh1.shape))
+        #print()
         # Embed Values
+        #dx = dx.flatten(1,2)[...,0]
+        dx = dx.flatten(1,3)[...,0]
+        #print()
         #print(dx.shape)
-        dx = dx.flatten(1,2)[...,0]
-        #print(dx.shape)
+        #print(x.shape, values.shape)
         vh = self.vh_embedding_layer(dx).unsqueeze(-1)
-        #print(vh.shape)
         vh = self.v_embedding_layer(vh)
 
         # Use FNO embedding
@@ -1032,12 +1064,24 @@ class StandardPhysicsInformedTokenTransformer2D(nn.Module):
         t = t.unsqueeze(1).unsqueeze(1)
         t_frac = t/self.num_layers
 
-        kh1 = self.kh1_embedding(kh1)
-        kh2 = self.kh2_embedding(kh2)
+        # Skip since we're using an LLM
+        ##kh1 = self.kh1_embedding(kh1)
+        ##kh2 = self.kh2_embedding(kh2)
+        #print("K SHAPE AFTER EMBEDDING: {} {}".format(kh1.shape, kh2.shape))
+        #print("VH OLD SHAPE: {}".format(vh_old.shape))
+        #print()
+        #print()
+        #raise
 
         for l in range(self.num_layers):
 
-            update, _ = self.feval_mhls[l](kh1, kh2, vh_old)
+            #print()
+            #print(kh1.shape, kh2.shape, vh_old.shape)
+            #print()
+            #print(t_frac.shape)
+            #update, _ = self.feval_mhls[l](kh1, kh2, vh_old)
+
+            update, _ = self.feval_mhls[l](kh1, vh, vh_old)  # Trying old data + embedding as operator
             update = self.dropout(update)
 
             t_h = self.t_embeddings[l](t_frac)
@@ -1053,7 +1097,11 @@ class StandardPhysicsInformedTokenTransformer2D(nn.Module):
             t_frac = t_frac + t/self.num_layers
 
         vh = torch.swapaxes(self.vh_unembedding_layer(torch.swapaxes(vh, 1, 2)), 1, 2)
-        out = self.output_layers(vh)[...,0].reshape((x.shape[0], x.shape[1], x.shape[2]))
+        #out = self.output_layers(vh)[...,0].reshape((x.shape[0], x.shape[1], x.shape[2]))
+        out = self.output_layers(vh)[...,0].reshape((x.shape[0], x.shape[1], x.shape[2], self.data_channels))
+        #print()
+        #print(x.shape, out.shape)
+        #print()
         return x + out
 
 
