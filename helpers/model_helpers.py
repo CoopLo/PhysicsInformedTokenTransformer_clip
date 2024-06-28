@@ -1,7 +1,8 @@
 import torch
 from models.fno import FNO2d
-from models.pitt import StandardPhysicsInformedTokenTransformer2D
-from models.dpot import DPOTNet
+from models.pitt import StandardPhysicsInformedTokenTransformer2D, LLMPITT2D
+from models.dpot import DPOTNet, LLMDPOTNet
+from models.lucidrains_vit import ViT, CLIPViT, LLMCLIPViT
 
 def get_neural_operator(model_name, config, data_channels):
     device = config['device']
@@ -72,6 +73,23 @@ def get_transformer(model_name, config):
         ).to(device)
 
     elif(model_name == 'vit'):
+        print("USING STANDARD VISION TRANSFORMER WITH: {}\n".format(config['llm']))
+        transformer = ViT(
+                   image_size=config['img_size'],
+                   patch_size=config['patch_size'],
+                   dim=config['dim'],
+                   depth=config['depth'],
+                   heads=config['heads'],
+                   mlp_dim=config['mlp_dim'],
+                   pool=config['pool'],
+                   channels=channels,
+                   out_channels=out_channels,
+                   dim_head=config['dim_head'],
+                   dropout=config['dropout'],
+                   emb_dropout=config['emb_dropout'],
+        ).to(device)
+
+    elif(model_name == 'clipvit'):
         print("USING CLIP VISION TRANSFORMER WITH: {}\n".format(config['llm']))
         transformer = CLIPViT(
                    image_size=config['img_size'],
@@ -103,15 +121,15 @@ def get_transformer(model_name, config):
         print("\n USING STANDARD EMBEDDING")
         print("DATA CHANNELS: {}".format(data_channels))
         neural_operator = get_neural_operator(config['neural_operator'], config, data_channels)
-        transformer = StandardPhysicsInformedTokenTransformer2D(
-                               100,
-                               config['hidden'],
-                               config['layers'],
-                               config['heads'],
-                               output_dim1=config['num_x'],
-                               output_dim2=config['num_y'],
-                               dropout=config['dropout'],
+        #transformer = StandardPhysicsInformedTokenTransformer2D(
+        transformer = LLMPITT2D(
+                               input_dim=config['input_dim'],
+                               hidden_dim=config['hidden'],
+                               num_layers=config['layers'],
+                               num_heads=config['heads'],
+                               img_size=config['img_size'],
                                neural_operator=neural_operator,
+                               dropout=config['dropout'],
                                data_channels=data_channels
         ).to(device=device)
 
@@ -123,10 +141,10 @@ def get_transformer(model_name, config):
                 mixing_type=config['mixing_type'],
                 in_channels=config['in_channels'],
                 out_channels=config['out_channels'],
-                in_timesteps=config['in_timesteps'],
-                out_timesteps=config['out_timesteps'],
+                in_timesteps=config['initial_step'],
+                out_timesteps=config['T_bundle'],
                 n_blocks=config['n_blocks'],
-                embed_dim=config['embed_dim'],
+                embed_dim=config['width'],
                 out_layer_dim=config['out_layer_dim'],
                 depth=config['depth'],
                 modes=config['modes'],
@@ -134,9 +152,32 @@ def get_transformer(model_name, config):
                 n_cls=config['n_cls'],
                 normalize=config['normalize'],
                 act=config['act'],
-                tim_agg=config['time_agg']
+                time_agg=config['time_agg']
         ).to(device)
-        pass
+
+    elif(model_name == "llmdpot"):
+        print("\nUSING DPOT")
+        transformer = LLMDPOTNet(
+                img_size=config['img_size'],
+                patch_size=config['patch_size'],
+                mixing_type=config['mixing_type'],
+                in_channels=config['in_channels'],
+                out_channels=config['out_channels'],
+                in_timesteps=config['initial_step'],
+                out_timesteps=config['T_bundle'],
+                n_blocks=config['n_blocks'],
+                embed_dim=config['width'],
+                out_layer_dim=config['out_layer_dim'],
+                depth=config['depth'],
+                modes=config['modes'],
+                mlp_ratio=config['mlp_ratio'],
+                n_cls=config['n_cls'],
+                normalize=config['normalize'],
+                act=config['act'],
+                time_agg=config['time_agg'],
+                llm=config['llm']
+        ).to(device)
+
     else:
         raise ValueError("Invalid model choice.")
     return transformer

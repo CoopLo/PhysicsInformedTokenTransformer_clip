@@ -14,7 +14,7 @@ import os
 import shutil
 from loss_funcs import LpLoss
 
-from models.pitt import StandardPhysicsInformedTokenTransformer2D
+from models.pitt import StandardPhysicsInformedTokenTransformer2D, LLMPITT2D
 from models.pitt import PhysicsInformedTokenTransformer2D
 from models.pitt import CLIPPhysicsInformedTokenTransformer2D
 
@@ -26,7 +26,7 @@ from models.deeponet import DeepONet2D
 from models.fno import FNO2d
 from models.transolver import EmbeddingTransolver
 
-from helpers import get_data, get_transformer, get_loss, as_rollout, ar_rollout
+from helpers import get_data, get_transformer, get_loss, get_dpot_loss, as_rollout, ar_rollout
 from metrics import metric_func
 
 import sys
@@ -80,140 +80,6 @@ def val_plots(ep, val_loader, preds, path="progress_plots", seed=None):
             plt.close()
 
             im_num += 1
-
-
-def new_get_data(config, pretraining=False, subset='heat,adv,burger'):
-
-    # Select specific file
-    if(config['dataset'] == 'shallow_water'):
-        filename = '2D_rdb_NA_NA.h5'
-        extension = 'shallow-water'
-    elif(config['dataset'] == 'diffusion_reaction'):
-        filename = '2D_diff-react_NA_NA.h5'
-        extension = 'diffusion-reaction'
-    elif(config['dataset'] == 'all'):
-        filenames = ['2D_rdb_NA_NA.h5', '2D_diff-react_NA_NA.h5']
-        saved_folders = ["/home/cooperlorsung/pdebench_data/2D/{}".format(i) for i in ['shallow-water', 'diffusion-reaction']]
-    else:
-        raise NotImplementedError("Select shallow_water or diffusion_reaction for now.")
-
-    if(config['dataset'] != 'all'):
-        train_data = FNODatasetSingle(
-                filename=filename,
-                saved_folder="/home/cooperlorsung/pdebench_data/2D/{}".format(extension),
-                initial_step=config['initial_step'],
-                reduced_resolution=config['reduced_resolution'],
-                reduced_resolution_t=config['reduced_resolution_t'],
-                reduced_batch=1,
-                if_test=False,
-                test_ratio=0.1,
-                num_samples_max=config['pretraining_num_samples'] if(pretraining) else config['num_samples'],
-
-                clip=config['clip'],
-                llm=config['llm'],
-                coeff=config['coeff'],
-                sentence=config['sentence'],
-                qualitative=config['qualitative'],
-        )
-        val_data = FNODatasetSingle(
-                filename=filename,
-                saved_folder="/home/cooperlorsung/pdebench_data/2D/{}".format(extension),
-                initial_step=1,
-                reduced_resolution=config['reduced_resolution'],
-                reduced_resolution_t=config['reduced_resolution_t'],
-                reduced_batch=1,
-                if_test=True,
-                test_ratio=0.1,
-                num_samples_max=config['num_samples'],
-
-                clip=config['clip'],
-                llm=config['llm'],
-                coeff=config['coeff'],
-                sentence=config['sentence'],
-                qualitative=config['qualitative'],
-        )
-        test_data = FNODatasetSingle(
-                filename=filename,
-                saved_folder="/home/cooperlorsung/pdebench_data/2D/{}".format(extension),
-                initial_step=1,
-                reduced_resolution=config['reduced_resolution'],
-                reduced_resolution_t=config['reduced_resolution_t'],
-                reduced_batch=1,
-                if_test=True,
-                test_ratio=0.1,
-                num_samples_max=config['num_samples'],
-
-                clip=config['clip'],
-                llm=config['llm'],
-                coeff=config['coeff'],
-                sentence=config['sentence'],
-                qualitative=config['qualitative'],
-        )
-    else:
-        print("\nTRAIN DATA")
-        train_data = MultiDataset(
-                filenames=filenames,
-                saved_folders=saved_folders,
-                initial_step=config['initial_step'],
-                reduced_resolution=config['reduced_resolution'],
-                reduced_resolution_t=config['reduced_resolution_t'],
-                reduced_batch=1,
-                if_test=False,
-                test_ratio=0.1,
-                num_samples_max=config['pretraining_num_samples'] if(pretraining) else config['num_samples'],
-
-                clip=config['clip'],
-                llm=config['llm'],
-                coeff=config['coeff'],
-                sentence=config['sentence'],
-                qualitative=config['qualitative'],
-        )
-        print("\nVAL DATA")
-        val_data = MultiDataset(
-                filenames=filenames,
-                saved_folders=saved_folders,
-                initial_step=config['initial_step'],
-                reduced_resolution=config['reduced_resolution'],
-                reduced_resolution_t=config['reduced_resolution_t'],
-                reduced_batch=1,
-                if_test=True,
-                test_ratio=0.1,
-                num_samples_max=config['num_samples'],
-
-                clip=config['clip'],
-                llm=config['llm'],
-                coeff=config['coeff'],
-                sentence=config['sentence'],
-                qualitative=config['qualitative'],
-        )
-        print("\nTEST DATA")
-        test_data = MultiDataset(
-                filenames=filenames,
-                saved_folders=saved_folders,
-                initial_step=config['initial_step'],
-                reduced_resolution=config['reduced_resolution'],
-                reduced_resolution_t=config['reduced_resolution_t'],
-                reduced_batch=1,
-                if_test=True,
-                test_ratio=0.1,
-                num_samples_max=config['num_samples'],
-
-                clip=config['clip'],
-                llm=config['llm'],
-                coeff=config['coeff'],
-                sentence=config['sentence'],
-                qualitative=config['qualitative'],
-        )
-    batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
-    print("\nPRETRAINING: {}\n".format(pretraining))
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
-                                               num_workers=config['num_workers'], shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
-                                             num_workers=config['num_workers'], shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size,
-                                             num_workers=config['num_workers'], shuffle=False)
-
-    return train_loader, val_loader, test_loader
 
 
 def get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn, times=None):
@@ -400,7 +266,7 @@ def run_pretraining(config, prefix, model="vit"):
         train_loss = 0
         max_val = 0
         transformer.train()
-        for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(train_loader):
+        for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(train_loader):
             start = time.time()
             loss = get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
                                         times=train_loader.dataset.t)
@@ -419,7 +285,7 @@ def run_pretraining(config, prefix, model="vit"):
         with torch.no_grad():
             transformer.eval()
             val_loss = 0
-            for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(val_loader):
+            for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(val_loader):
                 loss = get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
                                             times=val_loader.dataset.t)
                 val_loss += loss.item()
@@ -462,21 +328,23 @@ def run_pretraining(config, prefix, model="vit"):
 
 
 def evaluate(test_loader, transformer, loss_fn, config=None):
-    #src_mask = generate_square_subsequent_mask(640).cuda()
     metrics = {'RMSE': [], 'nRMSE': [], 'CSV': [], 'Max': [], 'BD': [], 'F': []}
     with torch.no_grad():
         transformer.eval()
         test_loss = 0
-        for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(test_loader):
-            # Forward pass: compute predictions by passing the input sequence
-            # through the transformer.
-            #y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn, times=test_loader.dataset.tsteps_t)
-            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
-                                                                                       sentence_embeddings, loss_fn,
+        for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(test_loader):
+            #y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
+            #                                                                           loss_fn,
+            #                                                                           sentence_embeddings=sentence_embeddings,
+            #                                                                           times=test_loader.dataset.dt,
+            #                                                                           evaluate=True)
+            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_dpot_loss(config, 1, transformer, x0, grid,
+                                                                                       coeffs,
+                                                                                       loss_fn,
+                                                                                       sentence_embeddings=sentence_embeddings,
                                                                                        times=test_loader.dataset.dt,
                                                                                        evaluate=True)
             test_loss += loss.item()
-            #test_loss += err_nRMSE.item()
 
             metrics['RMSE'].append(err_RMSE)
             metrics['nRMSE'].append(err_nRMSE)
@@ -497,15 +365,19 @@ def zero_shot_evaluate(transformer, config, seed, prefix, subset='Heat,Burger,Ad
     with torch.no_grad():
         transformer.eval()
         test_loss = 0
-        for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(test_loader):
-            #y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
-            #                           times=test_loader.dataset.tsteps_t, evaluate=True)
-            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
-                                                                                       sentence_embeddings, loss_fn,
+        for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(test_loader):
+            #y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_loss(config, transformer, x0, grid, coeffs,
+            #                                                                           loss_fn,
+            #                                                                           sentence_embeddings=sentence_embeddings,
+            #                                                                           times=test_loader.dataset.dt,
+            #                                                                           evaluate=True)
+            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_dpot_loss(config, 1, transformer, x0, grid,
+                                                                                       coeffs,
+                                                                                       loss_fn,
+                                                                                       sentence_embeddings=sentence_embeddings,
                                                                                        times=test_loader.dataset.dt,
                                                                                        evaluate=True)
             test_loss += loss.item()
-            #test_loss += err_nRMSE.item()
 
             metrics['RMSE'].append(err_RMSE)
             metrics['nRMSE'].append(err_nRMSE)
@@ -534,14 +406,13 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
     print(f'Total parameters = {total_params}')
 
     # Get data as loaders
-    #train_loader, val_loader, test_loader = new_get_data(config, subset=subset)
     train_loader, val_loader, test_loader = get_data(config)
 
     ################################################################
     # training and evaluation
     ################################################################
 
-    _data, _, _, _ = next(iter(val_loader))
+    _data, _, _, _, _ = next(iter(val_loader))
     dimensions = len(_data.shape)
     print('Spatial Dimension', dimensions - 3)
 
@@ -551,8 +422,6 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
                                                     steps_per_epoch=len(train_loader), epochs=config['epochs'])
 
     # Use mean squared error as the loss function.
-    #loss_fn = nn.L1Loss(reduction='mean')
-    #loss_fn = nn.MSELoss(reduction='mean')
     loss_fn = LpLoss(2,2)
 
     # Train the transformer for the specified number of epochs.
@@ -567,9 +436,13 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
         train_loss = 0
         max_val = 0
         transformer.train()
-        for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(train_loader):
+        for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(train_loader):
             start = time.time()
-            y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
+            #y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, loss_fn,
+            #                           sentence_embeddings=sentence_embeddings,
+            #                           times=train_loader.dataset.dt)
+            y_pred, y, loss = get_dpot_loss(config, epoch, transformer, x0, grid, coeffs, loss_fn,
+                                       sentence_embeddings=sentence_embeddings,
                                        times=train_loader.dataset.dt)
 
             # Backward pass: compute gradient of the loss with respect to model
@@ -595,9 +468,12 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
                 transformer.eval()
                 val_loss = 0
                 all_val_preds = []
-                for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(val_loader):
-                    # Forward pass: compute predictions by passing the input sequence
-                    y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
+                for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(val_loader):
+                    #y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, loss_fn,
+                    #                           sentence_embeddings=sentence_embeddings,
+                    #                           times=train_loader.dataset.dt)
+                    y_pred, y, loss = get_dpot_loss(config, epoch, transformer, x0, grid, coeffs, loss_fn,
+                                               sentence_embeddings=sentence_embeddings,
                                                times=train_loader.dataset.dt)
                     all_val_preds.append(y_pred.detach())
 
@@ -620,21 +496,15 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
 
         # Print the loss at the end of each epoch.
         if(epoch%config['log_freq'] == 0):
-            if(subset != 'heat,adv,burger'):
-                np.save("./{}/{}_train_l2s_{}.npy".format(path, subset, seed), train_losses)
-                np.save("./{}/{}_val_l2s_{}.npy".format(path, subset, seed), val_losses)
-                np.save("./{}/{}_lrs_{}.npy".format(path, subset, seed), lrs)
-            else:
-                np.save("./{}/train_l2s_{}.npy".format(path, seed), train_losses)
-                np.save("./{}/val_l2s_{}.npy".format(path, seed), val_losses)
-                np.save("./{}/lrs_{}.npy".format(path, seed), lrs)
+            np.save("./{}/{}_train_l2s_{}.npy".format(path, subset, seed), train_losses)
+            np.save("./{}/{}_val_l2s_{}.npy".format(path, subset, seed), val_losses)
+            np.save("./{}/{}_lrs_{}.npy".format(path, subset, seed), lrs)
             print(f"Epoch {epoch+1}: loss = {train_loss:.6f}\t val loss = {val_loss:.6f}")
 
         if(epoch%config['progress_plot_freq'] == 0 and len(y_train_true) >= 4):
             progress_plots(epoch, y_train_true, y_train_pred, y_val_true, y_val_pred, path, seed=seed, subset=subset)
 
     progress_plots(epoch, y_train_true, y_train_pred, y_val_true, y_val_pred, path, seed=seed, subset=subset)
-    #val_plots(epoch, val_loader, all_val_preds, seed=seed)
 
     test_vals = []
     eval_loss_fn = LpLoss(2,2)
@@ -646,14 +516,14 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
     test_value, best_metric = evaluate(test_loader, transformer, eval_loss_fn, config=config)
     test_vals.append(test_value)
     print("TEST VALUE BEST LAST EPOCH: {0:5f}".format(test_value))
-    if(subset != 'heat,adv,burger'):
-        np.save("./{}/{}_test_vals_{}.npy".format(path, subset, seed), test_vals)
-        np.save("./{}/metrics/{}_last_metrics_{}.npy".format(path, subset, seed), last_metric)
-        np.save("./{}/metrics/{}_best_metrics_{}.npy".format(path, subset, seed), best_metric)
-    else:
-        np.save("./{}/test_vals_{}.npy".format(path, seed), test_vals)
-        np.save("./{}/metrics/last_metric_{}.npy".format(path, seed), last_metric)
-        np.save("./{}/metrics/best_metric_{}.npy".format(path, seed), best_metric)
+    #if(subset != 'heat,adv,burger'):
+    np.save("./{}/{}_test_vals_{}.npy".format(path, subset, seed), test_vals)
+    np.save("./{}/metrics/{}_last_metrics_{}.npy".format(path, subset, seed), last_metric)
+    np.save("./{}/metrics/{}_best_metrics_{}.npy".format(path, subset, seed), best_metric)
+    #else:
+    #    np.save("./{}/test_vals_{}.npy".format(path, seed), test_vals)
+    #    np.save("./{}/metrics/last_metric_{}.npy".format(path, seed), last_metric)
+    #    np.save("./{}/metrics/best_metric_{}.npy".format(path, seed), best_metric)
 
     if(config['train_style'] == 'arbitrary_step'):
         as_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=seed)
@@ -676,11 +546,14 @@ if __name__ == '__main__':
         model_name = 'transolver'
         config_name = "transolver_2d_config.yaml"
     elif(sys.argv[1] == 'vit'):
-        model_name = 'vit'
+        model_name = 'clipvit'
         config_name = "lucidrains_2d_vit_config.yaml"
     elif(sys.argv[1] == 'pitt'):
         model_name = 'pitt'
         config_name = "pitt_2d_config.yaml"
+    elif(sys.argv[1] == 'dpot'):
+        model_name = 'llmdpot'
+        config_name = "dpot_2d_config.yaml"
     else:
         print("Using ViT by default.")
         model_name = 'vit'
@@ -707,7 +580,12 @@ if __name__ == '__main__':
         train_args['sim_time'] = 21
 
     # Loop over number of samples TODO: ns = -1 is not supported in autoregressive rollout
-    for ns in [10, 20, 50, 100]:
+    #for ns in [10, 20, 50, 100]:
+    #for ns in [10]:
+    for ns in [10, 20, 50]:#, 100]:
+    #for ns in [20, 50]:#, 100]:
+    #for ns in [50]:#, 100]:
+    #for ns in [100]:
 
         train_args['num_samples'] = ns
         train_args['num_data_samples'] = ns
@@ -723,9 +601,9 @@ if __name__ == '__main__':
                                             train_args['pretraining_num_samples'], prefix), exist_ok=True)
 
         # Copy files to save directory
-        shutil.copy("./configs/{}_2d_config.yaml".format(model_name),
-                    "{}{}_{}/{}/{}_2d_config.yaml".format(train_args['results_dir'], train_args['num_samples'],
-                                                               train_args['pretraining_num_samples'], prefix, model_name))
+        shutil.copy("./configs/{}".format(config_name),
+                    "{}{}_{}/{}/{}".format(train_args['results_dir'], train_args['num_samples'],
+                                           train_args['pretraining_num_samples'], prefix, config_name))
         shutil.copy("./plot_progress.py", "{}{}_{}/{}/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'],
                                                                                    train_args['pretraining_num_samples'], prefix))
         shutil.copy("./pretrain_plot_progress.py", "{}{}_{}/{}/pretrain_plot_progress.py".format(train_args['results_dir'],
@@ -739,6 +617,8 @@ if __name__ == '__main__':
             torch.manual_seed(seed)
             np.random.seed(seed)
             train_args['seed'] = seed
+            train_args['num_samples'] = ns
+            train_args['num_data_samples'] = ns
 
             # Will run pretraining if num_pretraining_samples > 0
             print("\n\nMODEL NAME: {}\n\n".format(model_name))
@@ -759,15 +639,6 @@ if __name__ == '__main__':
             train_args['dataset'] = 'all'
             if(not train_args['DEBUG']):
                 transfer_model_path = run_training(model, train_args, prefix, seed, subset=train_args['dataset'])
-            #if(train_args['transfer'] and train_args['dataset'] == 'all'):
-            #    transfer_model_path = model_path
-
-            # Try zero-shot and transfer learning...
-            # Create the transformer model.
-            #transformer = get_transformer('vit', config)
-            #transformer = get_transformer('vit', train_args)
-
-            #TODO: adjust this for the PDEBench data sets
 
             #if(train_args['transfer']):
             #for subset in ['diffusion_reaction', 'cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
@@ -778,11 +649,11 @@ if __name__ == '__main__':
 
                 if(train_args['DEBUG']):
                     train_args['dataset'] = 'cfd_rand_0.1_0.01_0.01'
-                    train_args['num_data_samples'] = 10*ns
+                    train_args['num_data_samples'] = 50
                 else:
-                    train_args['num_data_samples'] = 10*ns
                     print("\nDATA: {}\n".format(subset))
                     train_args['dataset'] = subset
+                    train_args['num_data_samples'] = 20*ns
 
                 ###
                 #  Either load from transfer learning path (standard training on combined data set) or from pretrained path
@@ -795,8 +666,9 @@ if __name__ == '__main__':
                     print("\nFINE TUNING FROM: {}\n".format(pretrained_model_path))
                     model.load_state_dict(torch.load(pretrained_model_path)['model_state_dict'])
 
-                print("\nDOING ZERO-SHOT EVALUATION\n")
-                zero_shot_evaluate(model, train_args, seed, prefix, subset=train_args['dataset'])
+                if(not train_args['DEBUG']):
+                    print("\nDOING ZERO-SHOT EVALUATION\n")
+                    zero_shot_evaluate(model, train_args, seed, prefix, subset=train_args['dataset'])
 
                 print("\nFINE TUNING ON INDIVIDUAL DATA SET\n")
                 model_path = run_training(model, train_args, prefix, seed, subset=train_args['dataset'])

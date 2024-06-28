@@ -8,7 +8,7 @@ args:
     results_dir: './test/'
 
     model: 'pitt' 
-    neural_operator: 'deeponet' # fno, oformer, deeponet
+    neural_operator: 'fno' # fno, oformer, deeponet
 
     #embedding: 'standard'
     #embedding: 'novel'

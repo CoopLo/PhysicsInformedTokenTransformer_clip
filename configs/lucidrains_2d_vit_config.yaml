@@ -1,29 +1,35 @@
 args:
     device: 'cuda:0'
-      #results_dir: './pdebench_vit_results/'
-      #results_dir: './combined_pdebench_vit_results/'
-    results_dir: './overlap_combined_pdebench_vit_results/'
+    DEBUG: False
+    #DEBUG: True
+    transfer: True
+    #transfer: False
 
-    base_path: '/home/cooperlorsung/'
-    #pretrained_model_path: "./AS_PRETRAINED_VITS/"
-    #pretrained_model_path: "./NOPRETRAIN_AS_PRETRAINED_VITS/"
-    #pretrained_model_path: "./FULL_PRETRAIN_AS_PRETRAINED_VITS/"
+    #results_dir: './VITT_TEST/'
+    results_dir: './HOPEFUL_PUSHFORWARD_VIT_TEST/'
+
     pretrained_model_path: "./QUALITATIVE_PRETRAINED_MODELS/"
 
-    # Toggle moddel loading
-    load_pretrained: True
-    #load_pretrained: False
+    model: 'pitt' 
+    neural_operator: 'fno' # fno, oformer, deeponet
 
+    ###
+    # Training setup
+    ###
     train_style: 'next_step'
-    #train_style: 'fixed_future'
-    #train_style: 'arbitrary_step'
-    #
-
+    t_bundle: 1
+    pushforward: 1
+    batch_size: 32
+    initial_step: 5
+    num_seeds: 3
+    
     ###
     # Choose data set
     ###
+    base_path: '/home/cooperlorsung/' # Set to path of saved data
     #dataset: 'shallow_water'
     #dataset: 'diffusion_reaction'
+    
     #dataset: 'cfd_rand_0.1_0.01_0.01'
     #dataset: 'cfd_rand_0.1_0.1_0.1'
     #dataset: 'cfd_rand_0.1_1e-8_1e-8'
@@ -32,87 +38,67 @@ args:
     #dataset: 'cfd_rand_1.0_1e-8_1e-8'
     #dataset: 'cfd_turb_0.1_1e-8_1e-8'
     #dataset: 'cfd_turb_1.0_1e-8_1e-8'
+    
     dataset: 'all'
-
-    ###
-    # Choose embedding strategy
-    ###
-    
-    clip: True
-    coeff: False       # Whether or not we use coefficient information
-    #coeff: True       # Whether or not we use coefficient information
-    
-    # Whether or not we incorporate qualitative information into text description. Can't use this without coefficient information
-    qualitative: False
-    #qualitative: True
-
-    # Whether or not we're returning sentences and training LLM end-to-end
-    sentence: False 
-    #sentence: True
-
-    #######################
-
-    ###
-    #  Choose pretraining/finetuning strategy
-    ###
-    pretraining: 'clip' # Or transfer...
-    #transfer: True
-    transfer: False
-
-    pretraining_loss: 'clip'
-    #pretraining_loss: 'weightedclip' # Or weightedclip or None
-    #llm: 'all-MiniLM-L6-v2'
-    llm: 'all-mpnet-base-v2'
-
     num_workers: 0
-    #batch_size: 16
-    #batch_size: 32
-    batch_size: 32
-    #batch_size: 128
-    #pretraining_batch_size: 32
-    pretraining_batch_size: 256
-    #pretraining_batch_size: 512
-    #initial_step: 1
-    initial_step: 5
-    #initial_step: 7
-
-    t_train: 200
-    validate: 100
-
-    reduced_resolution: 2
+    reduced_resolution: 4
     reduced_resolution_t: 1
     reduced_batch: 1
 
-    # Optimizer
-    #num_samples: 100
-    num_samples: 500
+
+    # Normalize across each channel of our data
+    normalize: False
+    #normalize: True
+
+    clip: True
+    pretraining_loss: 'clip'
+    #pretraining_loss: 'weightedclip' # Or weightedclip or None
+
+
+    ###
+    # Choose level of sentence information
+    ###
+    llm: 'all-mpnet-base-v2'
+
+    #bcs: False         # Whether or not we add boundary condition information into text description
+    bcs: True           # Whether or not we add boundary condition information into text description
+
+    # TODO: Explore adding coefficient information only to sentences, not additional channels
+    #coeff: False        # Whether or not we use coefficient information
+    coeff: True        # Whether or not we use coefficient information
+    
+    qualitative: False  # Whether or not we incorporate qualitative information into text description.
+    #qualitative: True  # Whether or not we incorporate qualitative information into text description.
+
+    sentence: False     # Whether or not we're returning sentences and training LLM end-to-end
+    #sentence: True     # Whether or not we're returning sentences and training LLM end-to-end
+    
+    # Training Optimizer
+    epochs: 1000
     learning_rate: 1.e-3
     weight_decay: 1.e-8
-    scheduler_step: 100
-    scheduler_gamma: 0.5
-    #epochs: 1000
-    #epochs: 1
-    #epochs: 5
-    #epochs: 500
-    epochs: 2000
-    num_seeds: 1
+    sim_time: 21
+    num_samples: 1000
 
-    # Pretraining optimizer
+    # Pretraining Optimizer
     pretraining_num_samples: 0
-    #pretraining_num_samples: 10
-    #pretraining_num_samples: 100
-    #pretraining_num_samples: 1000
-    #pretraining_num_samples: 10000
-    #pretraining_epochs: 1
     pretraining_epochs: 100
     pretraining_learning_rate: 1.e-3
     pretraining_weight_decay: 1.e-9
-    pretraining_training_type: single
 
+    # Tracking
+    validate: 1
+    log_freq: 25
+    progress_plot_freq: 100
+
+    ###
+    # Model hyperparameters
+    ###
     # ViT Parameters
     #downsample: 1
     #img_size: 128
     img_size: 64
+    #img_size: 32
     patch_size: 8
     patch_stride: 8 # Works if stride >= patch_size/2? Not exactly sure...
     dim: 64
@@ -126,17 +112,3 @@ args:
 
     qkv_bias: True
 
-    #num_x: 64
-    #num_y: 64
-    #num_x: 60
-    #num_y: 100
-    
-    sim_time: 21
-
-    # Set to 0 to skip pretraining
-    #pretraining_num_samples: 0
-    samples_per_equation: 1
-
-    # Tracking
-    log_freq: 100
-    progress_plot_freq: 100

@@ -1081,7 +1081,7 @@ class StandardPhysicsInformedTokenTransformer2D(nn.Module):
             #print(t_frac.shape)
             #update, _ = self.feval_mhls[l](kh1, kh2, vh_old)
 
-            update, _ = self.feval_mhls[l](kh1, vh, vh_old)  # Trying old data + embedding as operator
+            update, _ = self.feval_mhls[l](kh1, vh_old, vh_old)  # Trying old data + embedding as operator
             update = self.dropout(update)
 
             t_h = self.t_embeddings[l](t_frac)
@@ -1102,6 +1102,206 @@ class StandardPhysicsInformedTokenTransformer2D(nn.Module):
         #print()
         #print(x.shape, out.shape)
         #print()
+        return x + out
+
+
+ACTIVATION = {
+        'gelu':nn.GELU(),
+        'tanh':nn.Tanh(),
+        'sigmoid':nn.Sigmoid(),
+        'relu':nn.ReLU(),
+        'leaky_relu':nn.LeakyReLU(0.1),
+        'softplus':nn.Softplus(),
+        'ELU':nn.ELU(),
+        'silu':nn.SiLU()
+}
+class PatchEmbed(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, out_dim=128,act='gelu'):
+        super().__init__()
+        # img_size = to_2tuple(img_size)
+        # patch_size = to_2tuple(patch_size)
+        img_size = (img_size, img_size)
+
+        stride_size = (patch_size//2, patch_size//2)
+
+        patch_size = (patch_size, patch_size)
+        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.num_patches = num_patches
+
+        # Need to update for overlapping patches...
+        #self.out_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
+        out_size = int((self.img_size[0] + 2*0 - 1*(patch_size[0] - 1) - 1)/stride_size[0] + 1)
+        #print("\nOUT SIZE: {}\n".format(out_size))
+        self.out_size = (out_size, out_size)
+
+        self.out_dim = out_dim
+        self.act = ACTIVATION[act]
+
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=stride_size),
+            self.act,
+            nn.Conv2d(embed_dim, out_dim, kernel_size=1, stride=1)
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        assert H == self.img_size[0] and W == self.img_size[1], \
+               f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*    {self.img_size[1]})."
+        # x = self.proj(x).flatten(2).transpose(1, 2)
+        x = self.proj(x)
+        return x
+
+
+class LLMPITT2D(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_heads, img_size, neural_operator, dropout=0.1, data_channels=1,
+                 embedding_type='conv'):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.img_size = img_size
+        self.hidden_dim = hidden_dim
+        self.data_channels = data_channels
+        self.embedding_type = embedding_type
+
+        self.embedding = torch.nn.Embedding(input_dim, hidden_dim)
+        self.pos_encoding = PositionalEncoding(hidden_dim, dropout)
+
+        # Get input processing
+        self.k_embedding_layer = nn.Linear(768, input_dim)
+
+        if(self.embedding_type == 'conv'):
+            self.vh_embedding_layer = PatchEmbed(img_size=self.img_size, patch_size=8, in_chans=data_channels,
+                                                 embed_dim=hidden_dim, out_dim=hidden_dim, act='gelu')
+            self.vh_unembedding_layer = nn.Sequential(
+                nn.ConvTranspose2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=8, stride=8),
+                nn.GELU(),
+                nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=1, stride=1),
+                nn.GELU(),
+                nn.Conv2d(in_channels=hidden_dim, out_channels=self.data_channels, kernel_size=1, stride=1)
+            )
+            print("USING CONVOLUTIONAL EMBEDDING STRATEGY")
+        elif(self.embedding_type == 'fc'):
+        	self.vh_embedding_layer = nn.Linear(self.img_size*self.img_size*self.data_channels, input_dim)#, bias=False)
+        	self.vh_unembedding_layer = nn.Linear(input_dim, self.img_size*self.img_size*self.data_channels)#, bias=False)
+
+        	# Output decoding layer
+        	self.output_layers = nn.Sequential(
+        	             nn.Linear(hidden_dim, hidden_dim),
+        	             nn.GELU(),
+        	             nn.Dropout(dropout),
+        	             nn.Linear(hidden_dim, hidden_dim),
+        	             nn.GELU(),
+        	             nn.Dropout(dropout),
+        	             nn.Linear(hidden_dim, 1)
+        	)
+        else:
+            raise ValueError("Choose either 'conv' or 'fc' for embedding. Currently: {}".format(self.embedding))
+
+
+        # Query and value processing
+        self.v_embedding_layer = nn.Linear(np.prod(self.vh_embedding_layer.out_size), input_dim)#, bias=False)
+
+        # Internal Physics Model
+        self.neural_operator = neural_operator
+
+        # Dropout and layer number specification
+        self.dropout = nn.Dropout(dropout)
+        self.num_layers = num_layers
+
+        # Maybe give the option for multiple layers
+        self.feval_mhls = torch.nn.ModuleList()
+        self.t_embeddings = torch.nn.ModuleList()
+        self.updates = torch.nn.ModuleList()
+        self.updates_h = torch.nn.ModuleList()
+        for l in range(self.num_layers):
+
+            # For updating state
+            self.feval_mhls.append(LinearAttention(input_dim=hidden_dim, attn_type='galerkin',
+                                      heads=num_heads, dim_head=hidden_dim, dropout=dropout,
+                                      relative_emb=False,
+                                      init_method='xavier',
+                                      init_gain=1.
+            ))
+
+            # Embedding time
+            self.t_embeddings.append(torch.nn.Linear(1, input_dim))
+
+            # NN Update
+            self.updates.append(nn.Sequential(
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim)
+            ))
+
+            # NN Update
+            self.updates_h.append(nn.Sequential(
+                                       nn.Linear(hidden_dim+1, hidden_dim),
+                                       nn.GELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.GELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim)
+            ))
+
+
+    def forward(self, queries, keys, values, t):#, mask):
+
+        # Physics Model Forward
+        x = self.neural_operator(values, queries)
+
+        # Get difference between physics model output and input
+        dx = x - values[...,-self.data_channels:]
+
+        # Match dimension from LLM output
+        kh1 = self.k_embedding_layer(keys)
+        kh1 = self.embedding(kh1.long()) * np.sqrt(self.hidden_dim)
+        kh1 = self.pos_encoding(kh1)
+
+        # Embed values from neural operator output
+        vh = self.vh_embedding_layer(dx.permute(0,3,1,2)).flatten(2,3)
+        vh = self.v_embedding_layer(vh).permute(0,2,1)
+
+        # Use FNO embedding
+        vh_old = vh.clone()
+
+        # Embed time
+        t = t.unsqueeze(1).unsqueeze(1)
+        t_frac = t/self.num_layers
+
+        # Numerical-like updates
+        for l in range(self.num_layers):
+
+            # LLM-driven update operator
+            update, _ = self.feval_mhls[l](kh1, vh_old, vh_old)  # Trying old data + embedding as operator
+            update = self.dropout(update)
+
+            # Embed time and add to update 
+            t_h = self.t_embeddings[l](t_frac).permute(0,2,1)
+            up_t = torch.cat((update, t_h), dim=-1)
+            up_th = self.updates_h[l](up_t)
+
+            # Add update to old state
+            vh = vh_old + up_th
+            vh_old = vh.clone()
+
+            # Increment time
+            t_frac = t_frac + t/self.num_layers
+
+        # Project embedding to output size
+        if(self.embedding_type == 'conv'):
+            vh = rearrange(vh, 'b (h w) c -> b c h w', h=16, w=16) # Make this not hard coded?
+            out = self.vh_unembedding_layer(vh).permute(0,2,3,1)
+        elif(self.embedding_type == 'fc'):
+             vh = torch.swapaxes(self.vh_unembedding_layer(torch.swapaxes(vh, 1, 2)), 1, 2)
+             out = self.output_layers(vh)[...,0].reshape((x.shape[0], x.shape[1], x.shape[2], self.data_channels))
+
         return x + out
 
 

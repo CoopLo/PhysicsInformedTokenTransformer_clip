@@ -213,6 +213,9 @@ class FNODatasetSingle(Dataset):
         self.sentence = sentence
         self.qualitative = qualitative
 
+        # Get coefficient information. Inidicator for SW and RD (easier to always construct and return then handle later)
+        self.get_coeffs()
+
         root_path = os.path.join(os.path.abspath(saved_folder), filename)
 
         # Get train/test slice first. TODO No longer supports -1
@@ -463,6 +466,18 @@ class FNODatasetSingle(Dataset):
         #raise
 
 
+    def get_coeffs(self):
+        if('rdb' in self.filename):
+            self.coeffs = [1., 0., 0., 0., 0.]
+        elif('diff-react' in self.filename):
+            self.coeffs = [0., 1., 0., 0., 0.]
+        elif('CFD' in self.filename):
+            #print("\n\nFILE: {}\n\n".format(self.filename))
+            sf = self.filename.split("_")
+            self.coeffs = [0., 0., float(sf[3][1:]), float(sf[4][3:]), float(sf[5][4:])]
+        self.coeffs = torch.Tensor(self.coeffs)
+
+
     def get_llm(self):
         # Only get sentence_embedder if we're not returning whole sentences
         if(self.llm is not None and not self.sentence):
@@ -489,7 +504,8 @@ class FNODatasetSingle(Dataset):
                 if(self.coeff):
                     pass
                 if(self.qualitative):
-                    pass
+                    sentence += " This system simulates a radial dam break. Waves propagate outward in a circular pattern."
+
             elif('diffusion-reaction' in self.saved_folder):
                 # Equation description
                 sentence = "The Diffusion-Reaction equations model the change in concentration of one or more chemical "
@@ -504,6 +520,7 @@ class FNODatasetSingle(Dataset):
                     pass
                 if(self.qualitative):
                     pass
+
             elif('2D_Train' in self.saved_folder):
                 # Equation description
                 sentence = "The compressible Navier-Stokes equations model the motion of fluids with variable density. "
@@ -514,7 +531,6 @@ class FNODatasetSingle(Dataset):
 
                 if(self.coeff):
                     split_fname = self.filename.split("_")
-                    #print(split_fname)
                     sentence += "In this case, the mach number is {}, ".format(float(split_fname[3][1:]))
                     sentence += "the shear viscosity is {}, ".format(float(split_fname[4][3:]))
                     sentence += "and the bulk viscosity is {}.".format(float(split_fname[5][4:]))
@@ -523,7 +539,7 @@ class FNODatasetSingle(Dataset):
                         sentence += " A random field is the initial condition, which is not turbulent."
                     elif("Turb" in self.saved_folder):
                         sentence += " A turbulent velocity field is the initial condition."
-                        sentence += " This will produce highly chaotic flow patterns with small scale structure."
+                        sentence += " This will produce chaotic flow patterns with small scale structure."
                     else:
                         raise ValueError("Unexpected dataset: {}/{}".format(self.saved_folder, self.filename))
             else:
@@ -547,9 +563,9 @@ class FNODatasetSingle(Dataset):
         #TODO: Different training strategies, currently...?
         #return self.data[idx,...,:self.initial_step,:], self.data[idx], self.grid
         if(self.sentence or self.clip):
-            return self.data[idx], self.grid, self.dt[0], self.sentence_embeddings[idx] # Grid is constant
+            return self.data[idx], self.grid, self.coeffs, self.dt[0], self.sentence_embeddings[idx] # Grid and coeff is constant
         else:
-            return self.data[idx], self.grid, self.dt[0] # Grid is constant
+            return self.data[idx], self.grid, self.coeffs, self.dt[0] # Grid is constant
 
 
 class FNODatasetMult(Dataset):
@@ -657,7 +673,7 @@ class MultiDataset(Dataset):
                  ):
 
         #self.dsets = []
-        self.dsets, self.data, self.grids, self.dt = [], [], [], []
+        self.dsets, self.data, self.grids, self.dt, self.coeff = [], [], [], [], []
 
         self.clip = clip
         self.sentence = sentence
@@ -716,11 +732,13 @@ class MultiDataset(Dataset):
                 self.grids.append(self.dsets[-1].grid.unsqueeze(0))
 
             self.dt.append(self.dsets[-1].dt[:,:21])
+            self.coeff.append(self.dsets[-1].coeffs.unsqueeze(0))
 
         self.dt = torch.cat(self.dt, dim=0).cuda()
         self.data = torch.cat(self.data, dim=0).cuda()
         self.grids = torch.cat(self.grids, dim=0).cuda()
-        print(self.dt.shape, self.data.shape, self.grids.shape)
+        self.coeff = torch.cat(self.coeff, dim=0).cuda()
+        print(self.dt.shape, self.data.shape, self.grids.shape, self.coeff.shape)
 
 
     def __len__(self):
@@ -731,6 +749,13 @@ class MultiDataset(Dataset):
         dset_idx = idx%len(self.dsets)
         sample_idx = idx//len(self.dsets)
         if(self.clip or self.sentence):
-            return self.data[idx], self.grids[dset_idx], self.dt[dset_idx], self.dsets[dset_idx].sentence_embeddings[sample_idx]
+            return self.data[idx], \
+                   self.grids[dset_idx], \
+                   self.coeff[dset_idx], \
+                   self.dt[dset_idx], \
+                   self.dsets[dset_idx].sentence_embeddings[sample_idx]
         else:
-            return self.data[idx], self.grids[dset_idx], self.dt[dset_idx]
+            return self.data[idx], \
+                   self.grids[dset_idx], \
+                   self.coeff[dset_idx], \
+                   self.dt[dset_idx]
