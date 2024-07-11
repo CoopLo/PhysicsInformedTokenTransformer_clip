@@ -33,6 +33,7 @@ def make_prediction(config, transformer, x0, grid, t, coeffs=None, sentence_embe
             y_pred, cls_pred = transformer(x0, sentence_embeddings)
             y_pred = y_pred[...,0,:]
         else:
+            #print(x0.shape, sentence_embeddings.shape)
             y_pred = transformer(x0, sentence_embeddings)[...,0].permute(0,2,3,1)
     else:
         if(isinstance(transformer, DPOTNet)):
@@ -130,13 +131,16 @@ def get_dpot_loss(config, ep, transformer, x0, grid, coeffs, loss_fn, sentence_e
     steps = torch.Tensor(np.random.choice(range(config['initial_step'], config['sim_time']-horizon), x0.shape[0])).long()
     inp = torch.cat([x0[idx,:,:,i-config['initial_step']:i][None] for idx, i in enumerate(steps)], dim=0)
 
-    #inp = x0[...,:config['initial_step'],:]
+    if(config['time']):
+        #sentence_embeddings = torch.cat([sentence_embeddings[idx,i][None] for idx, i in enumerate(steps)], dim=0)
+        if(not config['sentence']):
+            sentence_embeddings = torch.cat([sentence_embeddings[idx,i][None] for idx, i in enumerate(steps)], dim=0)
+        else:
+            sentence_embeddings = [sentence_embeddings[i][idx] for idx, i in enumerate(steps)]
 
     t = times[:,0] if(isinstance(transformer, LLMPITT2D)) else None
     loss = 0
     for step in range(0, horizon, config['t_bundle']):
-        #print()
-        #print(step, inp.shape)
         # Inject noise
         inp = inp + NOISE_SCALE * torch.sum(inp**2, dim=(1,2,3), keepdim=True)**0.5 * torch.randn_like(inp)
 
@@ -145,41 +149,156 @@ def get_dpot_loss(config, ep, transformer, x0, grid, coeffs, loss_fn, sentence_e
 
         # Get ground truth value
         target_step = config['initial_step'] + step
-        #y = x0[...,target_step:target_step + config['t_bundle'],:]
-        #print(x0.shape, steps)
         y = torch.cat([x0[idx,:,:,i+step:i+step+config['t_bundle'],:][None] for idx, i in enumerate(steps)], dim=0)
 
-        #print(y_pred.shape, y.shape)
         sample_loss = loss_fn(y_pred, y)
         if(sample_loss.isnan()):
             break
         else:
             loss += sample_loss
-        #print(loss)
 
         # Update input
         inp = torch.cat((inp[..., config['t_bundle']:,:], y_pred.unsqueeze(3)), dim=-2)
 
-        # Stack predictions (seems unecessary?)
-        #if(step == 0):
-        #    pred = y_pred
-        #else:
-        #    pred = torch.cat((pred, y_pred), dim=-2)
-
-        #raise
-
     # Compute the loss.
     if(evaluate):
-        ch0 = not((y[...,-1,0] == 0).all())
-        ch1 = not((y[...,-1,1] == 0).all())
-        ch2 = not((y[...,-1,2] == 0).all())
-        ch3 = not((y[...,-1,3] == 0).all())
-        chans = [ch0, ch1, ch2, ch3]
-        err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = metric_func(y_pred.unsqueeze(3)[...,chans], y[...,chans],
-                                                                           if_mean=True, Lx=1., Ly=1., Lz=1.)
+        if(y.shape[-1] == 4):
+            ch0 = not((y[...,-1,0] == 0).all())
+            ch1 = not((y[...,-1,1] == 0).all())
+            ch2 = not((y[...,-1,2] == 0).all())
+            ch3 = not((y[...,-1,3] == 0).all())
+            chans = [ch0, ch1, ch2, ch3]
+            err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = metric_func(y_pred.unsqueeze(3)[...,chans], y[...,chans],
+                                                                               if_mean=True, Lx=1., Ly=1., Lz=1.)
+        else:
+            err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = metric_func(y_pred.unsqueeze(3), y,
+                                                                               if_mean=True, Lx=1., Ly=1., Lz=1.)
         return y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F
     else:
         return y_pred, y, loss
+
+
+def generate_pretraining_labels(config, coeffs, y_pred):
+    if(config['pretraining_loss'] == 'clip'):
+        # Only interested in diagonal
+        labels = torch.arange(y_pred.shape[0]).to(y_pred.device)
+
+    elif(config['pretraining_loss'] == 'weightedclip'):
+        # Dot product between all equation vectors
+        sim_mat = torch.sqrt(torch.sum((coeffs.unsqueeze(0) * coeffs.unsqueeze(1)).abs(), dim=-1))
+
+        norm_vec = torch.max(torch.cat((coeffs.norm(dim=-1).unsqueeze(-1),
+                                        coeffs.norm(dim=-1).unsqueeze(-1)), dim=-1), dim=-1)[0]
+
+        norm_mat1 = torch.ones(coeffs.shape[0]).unsqueeze(0).to(norm_vec.device) * norm_vec.unsqueeze(1)
+        norm_mat2 = norm_vec.unsqueeze(0) * torch.ones(coeffs.shape[0]).unsqueeze(1).to(norm_vec.device)
+        norm_mat = torch.cat((norm_mat1.unsqueeze(-1), norm_mat2.unsqueeze(-1)), dim=-1).max(dim=-1)[0]
+
+        sim_mat /= norm_mat
+        #if(DEBUG):
+        #    print(coeffs)
+        #    print(sim_mat)
+        labels = sim_mat.clone()
+
+    return labels
+
+
+def get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn, times=None, ep=0):
+    # Select data for input and target
+    if(config['train_style'] == 'next_step'):
+        steps = torch.Tensor(np.random.choice(range(config['initial_step'], config['sim_time']), x0.shape[0])).long()
+        y = torch.cat([x0[idx,:,:,i][None] for idx, i in enumerate(steps)], dim=0)
+
+        if(isinstance(transformer, (DPOTNet, LLMDPOTNet))):
+            x0 = torch.cat([x0[idx,:,:,i-config['initial_step']:i][None] for idx, i in enumerate(steps)], dim=0)
+        else:
+            x0 = torch.cat([x0[idx,:,:,i-config['initial_step']:i][None] for idx, i in enumerate(steps)], dim=0).flatten(3,4)
+
+        if(not isinstance(times, torch.Tensor)):
+            times = torch.Tensor(times)
+        if(isinstance(transformer, LLMPITT2D)):
+            # TODO Fix this. Should be dt, coeffs come later
+            t = torch.cat([times[idx, i][None] for idx, i in enumerate(steps)], dim=0)
+        else:
+            t = None
+
+        # Get correct string
+        if(config['time']):
+            #print()
+            #print(coeffs.shape)
+            #print(len(sentence_embeddings))
+            #print(len(sentence_embeddings[0]))
+            #print()
+            #print(steps)
+            ##print([(idx, i) for idx, i in enumerate(steps)])
+            #print(sentence_embeddings[17][0])
+            #print(coeffs[0])
+            #print()
+            #print(sentence_embeddings[20][1])
+            #print(coeffs[1])
+            #print()
+            #print(sentence_embeddings[10][2])
+            #print(coeffs[2])
+            #print()
+            #print(steps)
+            #print([idx for idx, i in enumerate(steps)])
+            #print([i for idx, i in enumerate(steps)])
+            #sentence_embeddings = [sentence_embeddings[i][idx][None] for idx, i in enumerate(steps)]
+            if(not config['sentence']):
+                sentence_embeddings = torch.cat([sentence_embeddings[idx,i][None] for idx, i in enumerate(steps)], dim=0)
+            else:
+                sentence_embeddings = [sentence_embeddings[i][idx] for idx, i in enumerate(steps)]
+
+        #print()
+        #print()
+        #print(sentence_embeddings.shape)
+        #print()
+        #print()
+        #raise
+
+    elif(config['train_style'] == 'fixed_future'):
+        y = x0[:, config['sim_time']]
+        x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
+    elif(config['train_style'] == 'arbitrary_step'):
+        # Generate random slices
+        steps = torch.Tensor(np.random.choice(range(config['initial_step'], config['sim_time']+1),
+                             x0.shape[0])).long()
+        y = torch.cat([x0[idx,i][None,None] for idx, i in enumerate(steps)], dim=0)
+        t = torch.cat([times[i][None] for idx, i in enumerate(steps)], dim=0)
+
+        # Use initial condition and stack target time
+        x0 = x0[:,:config['initial_step']]
+        if(times is None):
+            raise ValueError("Need target times to stack with data.")
+        x0 = torch.cat((x0, t[:,None,None,None].broadcast_to(x0.shape[0], 1, x0.shape[2], x0.shape[3])), axis=1)
+
+        # Reorder dimensions
+        y = y.permute(0,2,3,1)
+        x0 = x0.permute(0,2,3,1) if(len(x0.shape) == 4) else x0.unsqueeze(-1)
+
+    # Put data on correct device
+    if(config['coeff']): # Stack coefficients
+        # Fix size of coefficients
+        original_coeffs = coeffs.clone()
+        coeffs = coeffs[:,None,None,:].tile(1, x0.shape[1], x0.shape[2], 1)
+
+        # Stack coefficients onto values
+        if(len(x0.shape) == 5): # Hacked together
+            x0 = x0.flatten(3,4)
+        x0 = torch.cat((x0, coeffs), dim=-1)#.permute(0,3,1,2)
+    else:
+        #original_coeffs = None
+        original_coeffs = coeffs.clone()
+        if(not isinstance(transformer, (DPOTNet, LLMDPOTNet))):
+            if(len(x0.shape) == 5): # Hacked together
+                x0 = x0.flatten(3,4)
+
+    # Forward pass
+    y_pred = transformer(x0, sentence_embeddings, clip=True, ep=ep)
+    labels = generate_pretraining_labels(config, original_coeffs, y_pred)
+    loss = loss_fn(y_pred, labels)
+
+    return loss
 
 
 def as_rollout(test_loader, transformer, loss_fn, config, prefix, subset):
@@ -259,6 +378,53 @@ def as_rollout(test_loader, transformer, loss_fn, config, prefix, subset):
     return test_loss/(idx+1)
 
 
+def _get_grid_coeff_embeddings(test_loader, idx, transformer, config):
+    # Grid changes based on multi or single dataset.
+    if(isinstance(test_loader.dataset, MultiDataset)):
+        #TODO: This no longer supports unevenly sized data sets
+        sample_idx = idx%(int(0.2*config['num_samples']))
+        dset_idx = idx//int((0.2*config['num_samples']))
+
+        grid = test_loader.dataset.grids[dset_idx].unsqueeze(0)
+
+        if(not isinstance(transformer, (DPOTNet, ViT))):
+            # Select sentence embedding differently based on time or sentence...
+            sentence_embeddings = test_loader.dataset.dsets[dset_idx].sentence_embeddings[sample_idx]
+            if(config['time']):
+                if(not config['sentence']):
+                    sentence_embeddings = sentence_embeddings.unsqueeze(0)
+            else:
+                if(isinstance(sentence_embeddings, str)):
+                    sentence_embeddings = [sentence_embeddings]
+                else:
+                    sentence_embeddings = sentence_embeddings.unsqueeze(0)
+
+        else:
+            sentence_embeddings = None
+
+        coeffs = test_loader.dataset.coeff[dset_idx].unsqueeze(0)
+
+    else:
+        grid = test_loader.dataset.grid.unsqueeze(0)
+        if(not isinstance(transformer, (DPOTNet, ViT))):
+
+            sentence_embeddings = test_loader.dataset.sentence_embeddings[idx]
+
+            if(config['time']):
+                if(not config['sentence']):
+                    sentence_embeddings = sentence_embeddings.unsqueeze(0)
+            else:
+                if(isinstance(sentence_embeddings, str)):
+                    sentence_embeddings = [sentence_embeddings]
+                else:
+                    sentence_embeddings = sentence_embeddings.unsqueeze(0)
+        else:
+            sentence_embeddings = None
+        coeffs = test_loader.dataset.coeffs.unsqueeze(0)
+
+    return grid, coeffs, sentence_embeddings
+
+
 def ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=0):
     #TODO: Make robust to choosing coefficients
     device = config['device']
@@ -270,12 +436,12 @@ def ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=0
         # TODO: Loop over dataset not data loader
         print("Autoregressive rollout...")
         for idx in tqdm(range(test_loader.dataset.data.shape[0])):
-            #if(not isinstance(transformer, DPOTNet)):
+
             if(isinstance(transformer, (DPOTNet, LLMDPOTNet))):
                 x0 = test_loader.dataset.data[idx][...,:config['initial_step'],:].unsqueeze(0)
             else:
                 x0 = test_loader.dataset.data[idx][...,:config['initial_step'],:].unsqueeze(0).flatten(3,4)
-            #x0 = test_loader.dataset.data[idx][...,:config['initial_step'],:].unsqueeze(0)
+
             y = test_loader.dataset.data[idx][...,config['initial_step']:,:].unsqueeze(0)
             if(isinstance(transformer, LLMPITT2D)):
                 if(test_loader.dataset.dt.shape[0] == test_loader.dataset.data.shape[0]):
@@ -286,31 +452,7 @@ def ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=0
                 t = None
 
             # Grid changes based on multi or single dataset.
-            if(isinstance(test_loader.dataset, MultiDataset)):
-                #TODO: This no longer supports unevenly sized data sets
-                sample_idx = idx%(int(0.1*config['num_samples']))
-                dset_idx = idx//int((0.1*config['num_samples']))
-
-                try:
-                    grid = test_loader.dataset.grids[dset_idx].unsqueeze(0)
-                except IndexError:
-                    print(test_loader.dataset.grids.shape)
-                    print(test_loader.dataset.data.shape)
-                    print(test_loader.dataset.dt.shape)
-                    raise
-                if(not isinstance(transformer, (DPOTNet, ViT))):
-                    sentence_embeddings = torch.Tensor(test_loader.dataset.dsets[dset_idx].sentence_embeddings[sample_idx]).unsqueeze(0)
-                else:
-                    sentence_embeddings = None
-
-                coeffs = test_loader.dataset.coeff[dset_idx].unsqueeze(0)
-            else:
-                grid = test_loader.dataset.grid.unsqueeze(0)
-                if(not isinstance(transformer, (DPOTNet, ViT))):
-                    sentence_embeddings = test_loader.dataset.sentence_embeddings[idx].unsqueeze(0)
-                else:
-                    sentence_embeddings = None
-                coeffs = test_loader.dataset.coeffs.unsqueeze(0)
+            grid, coeffs, sentence_embeddings = _get_grid_coeff_embeddings(test_loader, idx, transformer, config)
 
             if(len(x0.shape) == 5 and not isinstance(transformer, (DPOTNet, LLMDPOTNet))):
                 x0 = x0[...,0,:]
@@ -318,46 +460,59 @@ def ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=0
             y_preds = []
             for i in range(y.shape[-2]):
 
-
                 # Make prediction
-                #coeffs = None #TODO: Need to make this option viable.
+                if(config['time']):
+                    if(config['sentence']):
+                        #print(len(sentence_embeddings))
+                        s_emb = [sentence_embeddings[i+config['initial_step']]]
+                    else:
+                        s_emb = sentence_embeddings[:,i+config['initial_step']]
+                else:
+                    s_emb = sentence_embeddings
 
-                #print()
-                #print(x0.shape, grid.shape, coeffs.shape)
-                y_pred = make_prediction(config, transformer, x0, grid, t, coeffs=coeffs, sentence_embeddings=sentence_embeddings)
+                # Should I update the channels during rollout...?
+                y_pred = make_prediction(config, transformer, x0, grid, t, coeffs=coeffs, sentence_embeddings=s_emb)
                 if(isinstance(transformer, EmbeddingTransolver)):
-                    #y_pred = transformer(grid, x0, sentence_embeddings)
                     x0 = torch.cat((x0, y_pred), dim=-1)[...,-transformer.space_dim:]
                 elif(isinstance(transformer, LLMPITT2D)):
-                    #y_pred = transformer(grid, sentence_embeddings, x0, t)
                     x0 = torch.cat((x0, y_pred), dim=-1)[...,-transformer.neural_operator.channels:]
                 elif(isinstance(transformer, (DPOTNet, LLMDPOTNet))):
-                    #print(x0.shape, y_pred.shape)
-                    #print(y_pred.unsqueeze(3).shape)
                     x0 = torch.cat((x0, y_pred.unsqueeze(3)), dim=-2)[...,-transformer.in_timesteps:,:]
-                    #print(x0.shape)
-                    #raise
                 else:
-                    #y_pred = transformer(inp).permute(0,4,2,3,1)[0]
                     shift = -transformer.channels + 5 if(config['coeff']) else -transformer.channels 
-                    #print("SHAPE: {} + {} \tSHIFT: {}".format(x0.shape, y_pred.shape, shift))
+
+                    # Zero out relevant channels from prediction
+                    ch0 = (y[...,0] == 0).all()
+                    ch1 = (y[...,1] == 0).all()
+                    ch2 = (y[...,2] == 0).all()
+                    ch3 = (y[...,3] == 0).all()
+                    chans = [ch0, ch1, ch2, ch3]
+                    y_pred[...,chans] = 0
+
                     x0 = torch.cat((x0, y_pred), dim=-1)[...,shift:]
-                #print()
 
                 # Save preds
-                y_preds.append(y_pred.unsqueeze(0))
+                y_preds.append(y_pred.unsqueeze(0).cpu())
 
             # Save data and preds
             all_y_preds.append(torch.cat(y_preds, dim=1))
-            all_y_trues.append(y)
+            all_y_trues.append(y.cpu())
 
     # Stack predictions and ground truth
+    torch.cuda.empty_cache()
     all_y_preds = torch.cat(all_y_preds, dim=0).permute(0,2,3,1,4)
     all_y_trues = torch.cat(all_y_trues, dim=0)
 
     # Now in shape traj x time x space x channels
     #mse = ((all_y_preds - all_y_trues)**2).mean(dim=(0,2))
-    mse = ((all_y_preds - all_y_trues)**2).mean(dim=(1,2,4))
+
+    # Only relevant channels
+    ch0 = not((y[...,0] == 0).all())
+    ch1 = not((y[...,1] == 0).all())
+    ch2 = not((y[...,2] == 0).all())
+    ch3 = not((y[...,3] == 0).all())
+    chans = [ch0, ch1, ch2, ch3]
+    mse = ((all_y_preds[...,chans] - all_y_trues[...,chans])**2).mean(dim=(1,2,4))
 
     # Save relevant info
     #path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'],

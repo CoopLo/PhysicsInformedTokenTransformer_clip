@@ -2,13 +2,26 @@ args:
     device: 'cuda:0'
     DEBUG: False
     #DEBUG: True
-    transfer: True
-    #transfer: False
+    #transfer: True
+    transfer: False
+    load_pretrained: True
 
     #results_dir: './VITT_TEST/'
-    results_dir: './HOPEFUL_PUSHFORWARD_VIT_TEST/'
+    #results_dir: './HOPEFUL_PUSHFORWARD_VIT_TEST/'
+    #results_dir: './maaaaaan_HOPEFUL_PUSHFORWARD_VIT_TEST/'
+    #results_dir: './LARGE_PUSHFORWARD_VIT_TEST/'
+    #
+    #results_dir: './FINAL_RESULTS/'
+    #results_dir: './NO_PUSHFORWARD_FINAL_RESULTS/'
+    #results_dir: './NEW_FINAL_RESULTS/'
+    #results_dir: './BIG_PATCH_PUSHFORWARD_FINAL_RESULTS/'
+    #
+    #results_dir: './FINAL_TEST/'
+    results_dir: './FIRST_FINAL_RESULTS/'
 
-    pretrained_model_path: "./QUALITATIVE_PRETRAINED_MODELS/"
+    #pretrained_model_path: "./PDEBENCH_QUALITATIVE_PRETRAINED_MODELS/"
+    #pretrained_model_path: "./_PDEBENCH_QUALITATIVE_PRETRAINED_MODELS/"
+    pretrained_model_path: "./FIRST_FINAL_PDEBENCH_PRETRAINED_MODELS/"
 
     model: 'pitt' 
     neural_operator: 'fno' # fno, oformer, deeponet
@@ -19,14 +32,14 @@ args:
     train_style: 'next_step'
     t_bundle: 1
     pushforward: 1
-    batch_size: 32
     initial_step: 5
-    num_seeds: 3
+    num_seeds: 1
     
     ###
     # Choose data set
     ###
     base_path: '/home/cooperlorsung/' # Set to path of saved data
+
     #dataset: 'shallow_water'
     #dataset: 'diffusion_reaction'
     
@@ -54,37 +67,47 @@ args:
     pretraining_loss: 'clip'
     #pretraining_loss: 'weightedclip' # Or weightedclip or None
 
-
     ###
     # Choose level of sentence information
     ###
-    llm: 'all-mpnet-base-v2'
+    #llm: 'all-mpnet-base-v2'
+    llm: 'all-MiniLM-L6-v2'
 
     #bcs: False         # Whether or not we add boundary condition information into text description
     bcs: True           # Whether or not we add boundary condition information into text description
 
     # TODO: Explore adding coefficient information only to sentences, not additional channels
-    #coeff: False        # Whether or not we use coefficient information
-    coeff: True        # Whether or not we use coefficient information
+    coeff: False        # Whether or not we use coefficient information as input condition
+    eq_coeff: True        # Whether or not we use coefficient information in text
     
-    qualitative: False  # Whether or not we incorporate qualitative information into text description.
-    #qualitative: True  # Whether or not we incorporate qualitative information into text description.
+    #qualitative: False  # Whether or not we incorporate qualitative information into text description.
+    qualitative: True  # Whether or not we incorporate qualitative information into text description.
 
     sentence: False     # Whether or not we're returning sentences and training LLM end-to-end
     #sentence: True     # Whether or not we're returning sentences and training LLM end-to-end
+
+    # If we add target simulation time to the sentence embedding
+    time: False
+    #time: True
     
     # Training Optimizer
     epochs: 1000
+    #batch_size: 32
+    batch_size: 64
+    #batch_size: 128
     learning_rate: 1.e-3
     weight_decay: 1.e-8
     sim_time: 21
-    num_samples: 1000
+    num_samples: 100
 
     # Pretraining Optimizer
-    pretraining_num_samples: 0
-    pretraining_epochs: 100
-    pretraining_learning_rate: 1.e-3
-    pretraining_weight_decay: 1.e-9
+    #pretraining_num_samples: 0
+    pretraining_num_samples: 200
+    #pretraining_num_samples: 10
+    pretraining_epochs: 1000
+    pretraining_batch_size: 128
+    pretraining_learning_rate: 1.e-4
+    pretraining_weight_decay: 1.e-8
 
     # Tracking
     validate: 1
@@ -96,15 +119,15 @@ args:
     ###
     # ViT Parameters
     #downsample: 1
-    #img_size: 128
-    img_size: 64
+    img_size: 128
+    #img_size: 64
     #img_size: 32
     patch_size: 8
     patch_stride: 8 # Works if stride >= patch_size/2? Not exactly sure...
-    dim: 64
-    depth: 3
+    dim: 128
+    depth: 1
     heads: 8
-    mlp_dim: 128
+    mlp_dim: 64
     pool: 'mean'
     dim_head: 64
     dropout: 0.01

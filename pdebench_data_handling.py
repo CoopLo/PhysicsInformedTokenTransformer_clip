@@ -170,20 +170,25 @@ class FNODatasetSingle(Dataset):
                  if_test=False,
                  test_ratio=0.1,
                  num_samples_max = -1,
+                 sim_time = -1,
 
                  clip = False,
                  llm = None,
                  sentence = False,
                  bcs = False,
                  coeff = False,
+                 eq_coeff = False,
                  qualitative = False,
+                 time = False,
 
                  max_timestep = -1,
                  
                  image_size = None,
 
                  transfer = False,
-                 normalize = False
+                 normalize = False,
+                 finetune = True,
+                 #finetune = False,
                  ):
         """
         
@@ -202,16 +207,20 @@ class FNODatasetSingle(Dataset):
         self.llm = llm
         self.sentence = sentence
         self.coeff = coeff
+        self.eq_coeff = eq_coeff
         self.qualitative = qualitative
         self.transfer = transfer
         self.bcs = bcs
         self.normalize = normalize
+        self.finetune = finetune
+        self.sim_time = sim_time
 
         # LLM attributes
         self.clip = clip
         self.llm = llm
         self.sentence = sentence
         self.qualitative = qualitative
+        self.time = time
 
         # Get coefficient information. Inidicator for SW and RD (easier to always construct and return then handle later)
         self.get_coeffs()
@@ -431,39 +440,25 @@ class FNODatasetSingle(Dataset):
         self.initial_step = initial_step
         self.data = self.data if torch.is_tensor(self.data) else torch.tensor(self.data)
         self.tsteps_t = torch.tensor(self.tsteps_t)
+        self.sim_time = len(self.tsteps_t) if(self.sim_time == -1) else self.sim_time
 
         self.dt = self.tsteps_t[1] - self.tsteps_t[0] * torch.ones(len(self.tsteps_t)).unsqueeze(0)
 
         # Need to add empty data channels when doing transfer learning because base model has 4
         ds = self.data.shape
-        if(self.transfer and ds[-1] != 4):
+        if((self.transfer or self.finetune) and ds[-1] != 4):
             self.data = torch.cat((self.data, torch.zeros(ds[0], ds[1], ds[2], ds[3], 4-ds[-1])), dim=-1)
 
         # Add sentence embeddings
         if(self.clip or self.sentence):
             self.get_llm()
-            self.sentence_embeddings = self.sentence_embeddings.cuda()
 
         self.data = self.data.cuda()
         self.grid = self.grid.cuda()
-        #print()
-        #print(self.data.shape)
         if(self.normalize):
             self.means = self.data.mean(dim=(0,1,2))[None,None,None]
             self.stds = self.data.std(dim=(0,1,2))[None,None,None]
-            #print(self.data.shape)
-            #print(self.means.shape)
-            #print(self.stds.shape)
-            #print()
-            #print(self.data.min(), self.data.max())
-            #print(self.means.max(), self.means.min())
-            #print(self.stds.max(), self.stds.min())
-            #print(self.means)
-            #print(self.stds)
             self.data = (self.data - self.means)/self.stds
-            #print(self.data.min(), self.data.max())
-        #print()
-        #raise
 
 
     def get_coeffs(self):
@@ -478,6 +473,36 @@ class FNODatasetSingle(Dataset):
         self.coeffs = torch.Tensor(self.coeffs)
 
 
+    def _add_sentence(self, sentence):
+        if(self.time):
+            sentences = []
+            for idx, tstep in enumerate(self.tsteps_t[:self.sim_time]):
+                if(idx == (len(self.tsteps_t)-1)):
+                    addition = " We are using data from time {0:.5f} to predict the system at time {1:.5f}.".format(tstep, tstep + self.dt[0][0])
+                else:
+                    addition = " We are using data from time {0:.5f} to predict the system at time {1:.5f}.".format(tstep, self.tsteps_t[idx+1])
+                
+                # Hold on to sentence or embed it
+                if(self.sentence):
+                    sentences.append(sentence + addition)
+                else:
+                    sentences.append(self.sentence_embedder.encode(sentence + addition))
+
+            # Hold on to sentence or embed it first
+            if(self.sentence):
+                #print(sentences)
+                #raise
+                self.sentences.append(sentences)
+            else:
+                self.sentence_embeddings.append(sentences)
+
+        else: # Not adding time
+            if(self.sentence):
+                self.sentences.append(sentence)
+            else:
+                self.sentence_embeddings.append(self.sentence_embedder.encode(sentence))
+
+
     def get_llm(self):
         # Only get sentence_embedder if we're not returning whole sentences
         if(self.llm is not None and not self.sentence):
@@ -485,7 +510,6 @@ class FNODatasetSingle(Dataset):
             self.sentence_embedder = SentenceTransformer(self.llm, device='cuda')
         elif(not self.sentence):
             self.sentence_embedder = SentenceTransformer("all-MiniLM-L6-v2", device='cuda')
-
         self.sentence_embeddings = []
         self.sentences = []
 
@@ -501,7 +525,7 @@ class FNODatasetSingle(Dataset):
                 if(self.bcs):
                     sentence += "This system has homogeneous Neumann boundary conditions "
                     sentence += "with a derivative of 0 at the boundary."
-                if(self.coeff):
+                if(self.eq_coeff):
                     pass
                 if(self.qualitative):
                     sentence += " This system simulates a radial dam break. Waves propagate outward in a circular pattern."
@@ -516,7 +540,7 @@ class FNODatasetSingle(Dataset):
                 if(self.bcs):
                     sentence += "This system has no-flow Neumann boundary conditions "
                     sentence += "with a derivative of 0 at the boundary."
-                if(self.coeff):
+                if(self.eq_coeff):
                     pass
                 if(self.qualitative):
                     pass
@@ -529,7 +553,7 @@ class FNODatasetSingle(Dataset):
                 if(self.bcs):
                     sentence += "This system has periodic boundary conditions. "
 
-                if(self.coeff):
+                if(self.eq_coeff):
                     split_fname = self.filename.split("_")
                     sentence += "In this case, the mach number is {}, ".format(float(split_fname[3][1:]))
                     sentence += "the shear viscosity is {}, ".format(float(split_fname[4][3:]))
@@ -545,16 +569,17 @@ class FNODatasetSingle(Dataset):
             else:
                 raise NotImplementedError("Only shallow_water and diffusion_reaction are supported for now.")
 
+            # Check if we're adding time here...
+            self._add_sentence(sentence)
 
-            if(self.sentence):
-                raise NotImplementedError("Need to implement full LLM training.")
-            else:
-                self.sentence_embeddings.append(self.sentence_embedder.encode(sentence))
+        if(not self.sentence):
+            self.sentence_embeddings = torch.Tensor(np.array(self.sentence_embeddings)).cuda()
+            del self.sentence_embedder
+        else:
+            # Need a way to get this to work with loader...
+            self.sentence_embeddings = self.sentences
 
-        self.sentence_embeddings = torch.Tensor(np.array(self.sentence_embeddings))
-        del self.sentence_embedder
         print("Done.")
-            
 
     def __len__(self):
         return len(self.data)
@@ -660,12 +685,15 @@ class MultiDataset(Dataset):
                  if_test=False,
                  test_ratio=0.1,
                  num_samples_max = -1,
+                 sim_time = -1,
 
                  clip = False,
                  llm = None,
                  sentence = False,
                  coeff = False,
+                 eq_coeff = False,
                  qualitative = False,
+                 time = False,
 
                  image_size = None,
                  bcs = False,
@@ -690,24 +718,25 @@ class MultiDataset(Dataset):
                     if_test=if_test,
                     test_ratio=test_ratio,
                     num_samples_max=num_samples_max,
+                    sim_time=sim_time,
 
                     clip=clip,
                     llm=llm,
                     bcs=bcs,
                     sentence=sentence,
                     coeff=coeff,
+                    eq_coeff=eq_coeff,
                     qualitative=qualitative,
+                    time=time,
 
                     image_size=image_size,
 
                     normalize=normalize,
+                    finetune=False
             ))
 
             # Need to adjust resolution and timeframe... try down first, then try up if its an issue, I suppose
             #TODO See if interpolating is any better.
-            #print()
-            #print(self.dsets[-1].data.shape)
-            #print()
             if(self.dsets[-1].data.shape[-1] == 1):  # Shallow water case
                 shape = list(self.dsets[-1].data.shape)
                 shape[-1] = 3
@@ -738,7 +767,6 @@ class MultiDataset(Dataset):
         self.data = torch.cat(self.data, dim=0).cuda()
         self.grids = torch.cat(self.grids, dim=0).cuda()
         self.coeff = torch.cat(self.coeff, dim=0).cuda()
-        print(self.dt.shape, self.data.shape, self.grids.shape, self.coeff.shape)
 
 
     def __len__(self):
@@ -759,3 +787,4 @@ class MultiDataset(Dataset):
                    self.grids[dset_idx], \
                    self.coeff[dset_idx], \
                    self.dt[dset_idx]
+

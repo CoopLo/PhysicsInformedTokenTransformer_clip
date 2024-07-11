@@ -314,94 +314,117 @@ if __name__ == '__main__':
         config = yaml.safe_load(stream)
 
     # Get arguments and get rid of unnecessary ones
-    train_args = config['args']
-    prefix = "2D_{}_".format(model_name) + train_args['train_style'] + "_" + train_args['dataset']
-    prefix += "_transfer" if(train_args['transfer']) else ""
-    prefix += "_coeff" if(train_args['coeff']) else ""
-    train_args['prefix'] = prefix
-    
-    if(train_args['dataset'] == 'all'):
+    for subset in [
+            'shallow_water',
+            'diffusion_reaction',
+            'cfd_rand_0.1_0.01_0.01',
+            'cfd_rand_0.1_0.1_0.1',
+            'cfd_rand_0.1_1e-8_1e-8',
+            'cfd_rand_1.0_0.01_0.01',
+            'cfd_rand_1.0_0.1_0.1',
+            'cfd_rand_1.0_1e-8_1e-8',
+            'cfd_turb_0.1_1e-8_1e-8',
+            'cfd_turb_1.0_1e-8_1e-8'
+            'all'
+        ]:
+        train_args = config['args']
+        train_args['dataset'] = subset
+
+        prefix = "2D_{}_".format(model_name) + train_args['train_style'] + "_" + train_args['dataset']
+        prefix += "_transfer" if(train_args['transfer']) else ""
+        prefix += "_coeff" if(train_args['coeff']) else ""
+        train_args['prefix'] = prefix
+        
+        #if(train_args['dataset'] == 'all'):
         train_args['sim_time'] = 21
 
-    # We're not using sentences anywhere here.
-    train_args['clip'] = False
-    train_args['sentence'] = False
+        # We're not using sentences anywhere here.
+        train_args['clip'] = False
+        train_args['sentence'] = False
 
-    # Loop over number of samples TODO: ns = -1 is not supported in autoregressive rollout
-    for ns in [10, 20, 50]:#, 100]:
-    #for ns in [10]:
-    #for ns in [50]:
-        train_args['num_samples'] = ns
-        train_args['num_data_samples'] = ns
+        # Loop over number of samples TODO: ns = -1 is not supported in autoregressive rollout
+        #for ns in [10, 20, 50]:#, 100]:
+        #for ns in [10, 20, 50, 100, 200]:#, 500]:
+        #for ns in [500]:
+        for ns in [1000]:
+        #for ns in [49]:
+        #for ns in [200]:
 
-        # Creat save directory
-        os.makedirs("{}{}/{}".format(train_args['results_dir'], train_args['num_samples'], prefix), exist_ok=True)
-        os.makedirs("{}{}/{}/metrics".format(train_args['results_dir'], train_args['num_samples'], prefix), exist_ok=True)
-        os.makedirs("{}{}/{}/zero_shot".format(train_args['results_dir'], train_args['num_samples'], prefix), exist_ok=True)
-        os.makedirs("{}{}/{}/rollouts".format(train_args['results_dir'], train_args['num_samples'], prefix), exist_ok=True)
+            if(subset != 'all'):
+                train_args['num_samples'] = ns
+                train_args['num_data_samples'] = ns
+            else:
+                train_args['num_samples'] = 1000
+                train_args['num_data_samples'] = 1000
 
-        # Copy files to save directory
-        #shutil.copy("./configs/2d_vit_config.yaml",
-        shutil.copy("./configs/{}".format(config_name),
-                    #"{}{}/{}/2d_vit_config.yaml".format(train_args['results_dir'], train_args['num_samples'], prefix))
-                    "{}{}/{}/{}".format(train_args['results_dir'], train_args['num_samples'], prefix, config_name))
-        shutil.copy("./plot_progress.py", "{}{}/{}/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'],
-                                                                               prefix))
-        shutil.copy("./pretrain_plot_progress.py", "{}{}/{}/pretrain_plot_progress.py".format(train_args['results_dir'],
-                                 train_args['num_samples'], prefix))
-        shutil.copy("./finetune_plot_progress.py", "{}{}/{}/finetune_plot_progress.py".format(train_args['results_dir'],
-                                 train_args['num_samples'], prefix))
+            # Creat save directory
+            os.makedirs("{}{}/{}".format(train_args['results_dir'], train_args['num_samples'], prefix), exist_ok=True)
+            os.makedirs("{}{}/{}/metrics".format(train_args['results_dir'], train_args['num_samples'], prefix), exist_ok=True)
+            os.makedirs("{}{}/{}/zero_shot".format(train_args['results_dir'], train_args['num_samples'], prefix), exist_ok=True)
+            os.makedirs("{}{}/{}/rollouts".format(train_args['results_dir'], train_args['num_samples'], prefix), exist_ok=True)
 
-        for seed in range(train_args['num_seeds']):
-            train_args['num_samples'] = ns
-            print("\nSEED: {}\n".format(seed))
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            train_args['seed'] = seed
+            # Copy files to save directory
+            #shutil.copy("./configs/2d_vit_config.yaml",
+            shutil.copy("./configs/{}".format(config_name),
+                        #"{}{}/{}/2d_vit_config.yaml".format(train_args['results_dir'], train_args['num_samples'], prefix))
+                        "{}{}/{}/{}".format(train_args['results_dir'], train_args['num_samples'], prefix, config_name))
+            shutil.copy("./plot_progress.py", "{}{}/{}/plot_progress.py".format(train_args['results_dir'], train_args['num_samples'],
+                                                                                   prefix))
+            shutil.copy("./pretrain_plot_progress.py", "{}{}/{}/pretrain_plot_progress.py".format(train_args['results_dir'],
+                                     train_args['num_samples'], prefix))
+            shutil.copy("./finetune_plot_progress.py", "{}{}/{}/finetune_plot_progress.py".format(train_args['results_dir'],
+                                     train_args['num_samples'], prefix))
 
-            # Try zero-shot and transfer learning...
+            for seed in range(train_args['num_seeds']):
+                train_args['num_samples'] = ns
+                print("\nSEED: {}\n".format(seed))
+                torch.manual_seed(seed)
+                np.random.seed(seed)
+                train_args['seed'] = seed
 
-            # Create the transformer model.
-            #transformer = get_transformer('vit', config)
-            if(train_args['DEBUG']):
-                train_args['dataset'] = 'cfd_rand_0.1_0.01_0.01'
-            elif(train_args['transfer']):
-                print("\nUSING COMBINED DATASET\n")
-                train_args['dataset'] = 'all'
+                # Try zero-shot and transfer learning...
 
-            transformer = get_transformer(model_name, train_args)
+                # Create the transformer model.
+                #transformer = get_transformer('vit', config)
+                if(train_args['DEBUG']):
+                    train_args['dataset'] = 'cfd_rand_0.1_0.01_0.01'
+                elif(train_args['transfer']):
+                    print("\nUSING COMBINED DATASET\n")
+                    train_args['dataset'] = 'all'
 
-            #TODO: adjust this for the PDEBench data sets
-            #for subset in ['heat,adv,burger']:#, 'heat', 'burger', 'adv']:
-            transfer_model_path = run_training(transformer, train_args, prefix, seed, subset=train_args['dataset'])
-            #if(train_args['transfer'] and train_args['dataset'] == 'all'):
-            #    transfer_model_path = model_path
+                transformer = get_transformer(model_name, train_args)
 
-            if(train_args['transfer']):
-                for subset in ['shallow_water', 'diffusion_reaction', 'cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
-                               'cfd_rand_0.1_1e-8_1e-8', 'cfd_rand_1.0_0.01_0.01', 'cfd_rand_1.0_0.1_0.1', 'cfd_rand_1.0_1e-8_1e-8',
-                               'cfd_turb_0.1_1e-8_1e-8', 'cfd_turb_1.0_1e-8_1e-8']:
-                    if(train_args['DEBUG']):
-                        train_args['dataset'] = 'cfd_rand_0.1_0.01_0.01'
-                        train_args['num_data_samples'] = 50
-                    else:
+                #TODO: adjust this for the PDEBench data sets
+                #for subset in ['heat,adv,burger']:#, 'heat', 'burger', 'adv']:
+                transfer_model_path = run_training(transformer, train_args, prefix, seed, subset=train_args['dataset'])
+                #if(train_args['transfer'] and train_args['dataset'] == 'all'):
+                #    transfer_model_path = model_path
+
+                if(train_args['transfer']):
+                    for subset in ['shallow_water', 'diffusion_reaction', 'cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
+                                   'cfd_rand_0.1_1e-8_1e-8', 'cfd_rand_1.0_0.01_0.01', 'cfd_rand_1.0_0.1_0.1', 'cfd_rand_1.0_1e-8_1e-8',
+                                   'cfd_turb_0.1_1e-8_1e-8', 'cfd_turb_1.0_1e-8_1e-8']:
+                        if(train_args['DEBUG']):
+                            train_args['dataset'] = 'cfd_rand_0.1_0.01_0.01'
+                            train_args['num_data_samples'] = 50
+                        else:
+                            print("\nDATA: {}\n".format(subset))
+                            train_args['dataset'] = subset
+                            #train_args['num_data_samples'] = 20*ns
+                            train_args['num_data_samples'] = 1000
+
                         print("\nDATA: {}\n".format(subset))
                         train_args['dataset'] = subset
-                        train_args['num_data_samples'] = 20*ns
 
+                        print("\nTRANSFER LEARNING FROM: {}\n".format(transfer_model_path))
+                        transformer.load_state_dict(torch.load(transfer_model_path)['model_state_dict'])
 
-                    print("\nDATA: {}\n".format(subset))
-                    train_args['dataset'] = subset
+                        print("\nDOING ZERO-SHOT EVALUATION\n")
+                        zero_shot_evaluate(transformer, train_args, seed, prefix, subset=train_args['dataset'])
 
-                    print("\nTRANSFER LEARNING FROM: {}\n".format(transfer_model_path))
-                    transformer.load_state_dict(torch.load(transfer_model_path)['model_state_dict'])
+                        print("\nFINE TUNING ON INDIVIDUAL DATA SET\n")
+                        model_path = run_training(transformer, train_args, prefix, seed, subset=train_args['dataset'])
 
-                    print("\nDOING ZERO-SHOT EVALUATION\n")
-                    zero_shot_evaluate(transformer, train_args, seed, prefix, subset=train_args['dataset'])
-
-                    print("\nFINE TUNING ON INDIVIDUAL DATA SET\n")
-                    model_path = run_training(transformer, train_args, prefix, seed, subset=train_args['dataset'])
-
-                    if(train_args['DEBUG']):
-                        break
+                        if(train_args['DEBUG']):
+                            break
     

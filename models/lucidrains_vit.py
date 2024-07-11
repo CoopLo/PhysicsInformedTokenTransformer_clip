@@ -205,21 +205,8 @@ class ViT(nn.Module):
     
     def forward(self, img, features=False):
         img = img.permute(0,3,1,2)
-        #print()
-        #print(img.shape)
-        #print(self.rearranger(img).shape)
-        #print(self.patch_dim)
-        #print()
-        #raise
 
-        #print()
-        #print(img.shape)
-        #x = self.to_patch_embedding(img)
         x = self.to_patch_embedding(img).flatten(2,3).permute(0,2,1)
-        #print(self.to_patch_embedding.out_size[0])
-        #print(x.shape)
-        #print()
-        #raise
         b, n, _ = x.shape
         
         cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
@@ -227,24 +214,16 @@ class ViT(nn.Module):
         x += self.pos_embedding[:, :(n + 1)]
         x = self.dropout(x)
         
-        #print("EMBEDDED X: {}".format(x.shape))
         x = self.transformer(x)
         
         # Remove class token
-        #print("POST TRANSFORMER: {}".format(x.shape))
         x = x[:,:-1]
-        #print("POST TRANSFORMER: {}".format(x.shape))
         hw = (self.image_size//4)-1
         x = rearrange(x, 'b (h w) c -> b c h w', h=hw, w=hw)
-        #print("POST REARRANGE: {}".format(x.shape))
         x = self.unpatchify(x)
-        #x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
-        #print("UNPATCHED: {}".format(x.shape))
         x = self.proj_down(x.permute(0,2,3,1))#.permute(0,3,1,2)
-        #print("FINAL: {}".format(x.shape))
         
-        #raise
-        return x#.unsqueeze(-1)
+        return x
 
 
 class OverlapViT(nn.Module):
@@ -409,8 +388,8 @@ class CLIPViT(nn.Module):
                                  nn.ReLU(),
                                  nn.Linear(2*dim, dim),
                                  nn.ReLU(),
-                                 #nn.Linear(dim, dim//2)
-                                 nn.Linear(dim, dim)
+                                 nn.Linear(dim, dim//2)
+                                 #nn.Linear(dim, dim)
                                  #nn.Linear(2*dim, dim)
         )
 
@@ -425,10 +404,42 @@ class CLIPViT(nn.Module):
         #                         nn.Linear(dim, dim//2)
         #                         #nn.Linear(dim, dim)
         #)
+        self.x_emb_proj = nn.Sequential(
+                                 nn.Linear(dim, dim),
+                                 nn.ReLU(),
+                                 nn.Linear(dim, dim),
+                                 nn.ReLU(),
+                                 nn.Linear(dim, 1)
+        )
+        self.x_channel_proj = nn.Sequential(
+                                 nn.Linear(num_patches+1, dim),
+                                 nn.ReLU(),
+                                 nn.Linear(dim, dim),
+                                 nn.ReLU(),
+                                 nn.Linear(dim, dim//2)
+        )
+
+        #self.x_channel_proj = nn.Sequential(
+        #                         nn.Linear((num_patches+1)*dim, dim),
+        #                         nn.ReLU(),
+        #                         nn.Linear(dim, dim),
+        #                         nn.ReLU(),
+        #                         nn.Linear(dim, dim//2)
+        #)
+
+        for l in self.sentence_proj:
+            if(isinstance(l, nn.Linear)):
+                torch.nn.init.xavier_normal_(l.weight, gain=1.)
+        for l in self.x_channel_proj:
+            if(isinstance(l, nn.Linear)):
+                torch.nn.init.xavier_normal_(l.weight, gain=1.)
+        for l in self.x_emb_proj:
+            if(isinstance(l, nn.Linear)):
+                torch.nn.init.xavier_normal_(l.weight, gain=1.)
 
         # OFormer encoder
-        self.x_proj = SpatialTemporalEncoder2D(input_channels=channels, heads=4, in_emb_dim=32,
-                                          out_seq_emb_dim=dim//2, depth=4)
+        #self.x_proj = SpatialTemporalEncoder2D(input_channels=self.channels, heads=4, in_emb_dim=32,
+        #                                  out_seq_emb_dim=dim//2, depth=4)
         self.proj_down = nn.Sequential(
                 nn.Linear(image_size*image_size, 128),
                 nn.SiLU(),
@@ -447,16 +458,8 @@ class CLIPViT(nn.Module):
         self.pretrained = False
 
 
-    #def __repr__(self):
-    #    return f'vit'
-
-    
-    def forward(self, img, sentence_embeddings, clip=False, return_embedding=False):
+    def forward(self, img, sentence_embeddings, clip=False, return_embedding=False, ep=2):
         img = img.permute(0,3,1,2)
-        #print()
-        #print(img.shape)
-        #print()
-        #x = self.to_patch_embedding(img)
         x = self.to_patch_embedding(img).flatten(2,3).permute(0,2,1)
         b, n, _ = x.shape
         
@@ -469,43 +472,94 @@ class CLIPViT(nn.Module):
         sentence_emb = self.sentence_proj(sentence_embeddings) # Lets also try with/without
 
         # Get data embedding
-        #if(isinstance(self.x_proj, SpatialTemporalEncoder2D)):
-        #    # Definitely not ideal... can rework if results are better
-        #    coeffs = img[:,-5:]
-        #    grid = img[:,-7:-5]
-        #    data = img[:,:-7]
-        #    data = torch.cat((data, coeffs), dim=1).flatten(2,3).permute(0,2,1)
-        #    grid = grid.flatten(2,3).permute(0,2,1)
+        if(isinstance(self.x_channel_proj, SpatialTemporalEncoder2D)):
+            # Definitely not ideal... can rework if results are better
+            coeffs = img[:,-5:]
+            grid = img[:,-7:-5]
+            data = img[:,:-7]
+            data = torch.cat((data, coeffs), dim=1).flatten(2,3).permute(0,2,1)
+            grid = grid.flatten(2,3).permute(0,2,1)
 
-        #    x_emb = self.x_proj(data, input_pos=grid).permute(0,2,1)
-        #    x_emb = self.proj_down(x_emb)[...,0]
-        #else:
-        #    x_emb = self.x_proj(x.flatten(1,2))
+            x_emb = self.x_proj(data, input_pos=grid).permute(0,2,1)
+            x_emb = self.proj_down(x_emb)[...,0]
+        else:
+            #print()
+            #print(x.shape)
+            #print(self.x_emb_proj(x).shape)
+            x_emb = self.x_channel_proj(self.x_emb_proj(x)[...,0])
+            #x_emb = self.x_channel_proj(x.flatten(1,2))
+            #print(x_emb.shape)
+            #print()
+            #raise
 
         ### Normalize embeddings
-        #sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
-        #x_emb = F.normalize(x_emb, p=2, dim=-1)
+        sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
+        x_emb = F.normalize(x_emb, p=2, dim=-1)
+        #print()
+        #print(x_emb.shape)
+        #print(x_emb[0] == x_emb[1])
+        #print()
+        #raise
 
         if(return_embedding):
-            ##sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
-            ##x_emb = F.normalize(x_emb, p=2, dim=-1)
+
             cross_corr = x_emb @ sentence_emb.T
+            #cross_corr = x_emb @ x_emb.T
+            #cross_corr = sentence_emb @ sentence_emb.T
+
             return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1), cross_corr
         if(clip):
             # Normalize embeddings
-            ##sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
-            ##x_emb = F.normalize(x_emb, p=2, dim=-1)
+            #sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
+            #x_emb = F.normalize(x_emb, p=2, dim=-1)
+            #print()
+            #print(x_emb.shape, sentence_emb.shape)
+            #print()
+            #print(x_emb)
+            #print()
+            #print(sentence_emb)
+            #print()
+            #print(ep, ep%3)
+
+            #if(ep%3 == 0):
+            #    x_emb = x_emb.detach()
+            #elif(ep%3 == 1):
+            #    sentence_emb = sentence_emb.detach()
+
+            #if(ep%3 == 0):
+            #    cross_corr = x_emb @ x_emb.T
+            #elif(ep%3 == 1):
+            #    cross_corr = sentence_emb @ sentence_emb.T
+            #else:
+            #    cross_corr = x_emb @ sentence_emb.T
             cross_corr = x_emb @ sentence_emb.T
+
+            ##raise
+            #print()
+            #print(sentence_embedding)
+            #print()
+            #raise
+
+            #cross_corr = x_emb @ sentence_emb.T
+            #cross_corr = x_emb @ x_emb.T
+            #cross_corr = sentence_emb @ sentence_emb.T
+
+            #print(cross_corr.shape)
+            #raise
             return cross_corr
         else:
 
-            #embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)
-            embedding = sentence_emb.unsqueeze(1).clone()
+            embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)
+            #embedding = sentence_emb.unsqueeze(1).clone()
 
             #embedding = embedding.detach() if(self.pretrained) else embedding
+            #print()
             #print(embedding.shape, x.shape)
+            #print()
+            #print()
             x = torch.cat((x, embedding), dim=1)
             #x = torch.cat((x, sentence_emb.unsqueeze(1)), dim=1)
+            #raise
 
         # Transformer forward
         #print(x.shape)
@@ -515,7 +569,11 @@ class CLIPViT(nn.Module):
         # Remove class token
         x = x[:,:-2]
         #print(x.shape)
+
+        #TODO: Automate this based on patch size, not image size...
         hw = (self.image_size//4)-1
+        #hw = 15
+
         x = rearrange(x, 'b (h w) c -> b c h w', h=hw, w=hw)
         x = self.unpatchify(x)
         #print(x.shape)
@@ -534,6 +592,238 @@ class CLIPViT(nn.Module):
 
 
 class LLMCLIPViT(nn.Module):
+    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0., llm=None, out_channels=1):
+        super().__init__()
+        self.channels = channels-2
+        self.llm = llm
+        self.llm_model = SentenceTransformer(llm, device='cuda')
+        self.image_size = image_size
+        image_height, image_width = pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+
+        assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
+        
+        #num_patches = (image_height // patch_height) * (image_width // patch_width)
+        #patch_dim = channels * patch_height * patch_width
+        #assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+        #
+        #self.to_patch_embedding = nn.Sequential(
+        #    Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
+        #    nn.LayerNorm(patch_dim),
+        #    nn.Linear(patch_dim, dim),
+        #    nn.LayerNorm(dim),
+        #)
+        num_patches = (image_height // patch_height) * (image_width // patch_width)
+        self.patch_dim = self.channels * patch_height * patch_width
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+        
+        #self.to_patch_embedding = nn.Sequential(
+        #    Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
+        #    nn.LayerNorm(self.patch_dim),
+        #    nn.Linear(self.patch_dim, dim),
+        #    nn.LayerNorm(dim),
+        #)
+
+        #self.unpatchify = nn.Sequential(
+        #    Rearrange('b (h w) (p1 p2 c) -> b c (h p1) (w p2)', p1 = patch_height, p2 = patch_width, h = image_height // patch_height, w = image_width // patch_width)
+        #)
+        self.to_patch_embedding = PatchEmbed(img_size=image_size, patch_size=patch_size, in_chans=self.channels,
+                                            embed_dim=out_channels * patch_size + 3, out_dim=dim,act='gelu')
+        self.unpatchify = self.vh_unembedding_layer = nn.Sequential(
+                nn.ConvTranspose2d(in_channels=dim, out_channels=dim, kernel_size=8, stride=4),
+                nn.GELU(),
+                nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=1, stride=1),
+                nn.GELU(),
+                nn.Conv2d(in_channels=dim, out_channels=4, kernel_size=1, stride=1)
+        )
+        
+        num_patches =  self.to_patch_embedding.out_size[0]*self.to_patch_embedding.out_size[1]
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.num_features = dim
+        self.pool = pool 
+        self.to_latent = nn.Identity()
+
+        # Hard-coded For CLIP
+        input_embed_dim = 768 if(self.llm == 'all-mpnet-base-v2') else 384
+        self.sentence_proj = nn.Sequential(
+                                 nn.Linear(input_embed_dim, 2*dim),
+                                 nn.ReLU(),
+                                 nn.Linear(2*dim, 2*dim),
+                                 nn.ReLU(),
+                                 nn.Linear(2*dim, dim),
+                                 nn.ReLU(),
+                                 nn.Linear(dim, dim//2)
+                                 #nn.Linear(dim, dim)
+                                 #nn.Linear(2*dim, dim)
+        )
+
+        # Can also try OFormer here...
+        # What is 64...? 
+        #self.x_proj = nn.Sequential(
+        #                         nn.Linear((64+1)*dim, 2*dim),
+        #                         nn.SiLU(),
+        #                         nn.Linear(2*dim, 2*dim),
+        #                         nn.SiLU(),
+        #                         nn.Linear(2*dim, dim), #                         nn.SiLU(),
+        #                         nn.Linear(dim, dim//2)
+        #                         #nn.Linear(dim, dim)
+        #)
+        self.x_emb_proj = nn.Sequential(
+                                 nn.Linear(dim, dim),
+                                 nn.SiLU(),
+                                 nn.Linear(dim, dim),
+                                 nn.SiLU(),
+                                 nn.Linear(dim, 1)
+        )
+        self.x_channel_proj = nn.Sequential(
+                                 nn.Linear(num_patches+1, dim),
+                                 nn.SiLU(),
+                                 nn.Linear(dim, dim),
+                                 nn.SiLU(),
+                                 nn.Linear(dim, dim//2)
+        )
+        for l in self.sentence_proj:
+            if(isinstance(l, nn.Linear)):
+                torch.nn.init.xavier_normal(l.weight, gain=5.)
+        for l in self.x_channel_proj:
+            if(isinstance(l, nn.Linear)):
+                torch.nn.init.xavier_normal(l.weight, gain=5.)
+        for l in self.x_emb_proj:
+            if(isinstance(l, nn.Linear)):
+                torch.nn.init.xavier_normal(l.weight, gain=5.)
+
+        # OFormer encoder
+        #self.x_proj = SpatialTemporalEncoder2D(input_channels=self.channels, heads=4, in_emb_dim=32,
+        #                                  out_seq_emb_dim=dim//2, depth=4)
+        self.proj_down = nn.Sequential(
+                nn.Linear(image_size*image_size, 128),
+                nn.SiLU(),
+                nn.Linear(128,64),
+                nn.SiLU(),
+                nn.Linear(64,1)
+        )
+
+        self.final_proj_down = nn.Sequential(
+                             nn.Linear(4, 16),           # Not sure why this is hard-coded to 4.
+                             nn.SiLU(),
+                             nn.Linear(16, 16),
+                             nn.SiLU(),
+                             nn.Linear(16, out_channels)
+        )
+        self.pretrained = False
+
+
+    @torch.enable_grad()
+    def _llm_forward(self, sentence):
+        tokenized_sentences = self.llm_model.tokenize(sentence)
+        for key, val in tokenized_sentences.items():
+            tokenized_sentences[key] = val.to(self.llm_model.device)
+        output = self.llm_model(tokenized_sentences)['sentence_embedding']
+        return output
+
+    
+    def forward(self, img, sentence_embeddings, clip=False, return_embedding=False, ep=0):
+        img = img.permute(0,3,1,2)
+        #print()
+        #print(img.shape)
+        #print()
+        #x = self.to_patch_embedding(img)
+        x = self.to_patch_embedding(img).flatten(2,3).permute(0,2,1)
+        b, n, _ = x.shape
+        
+        cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding[:, :(n + 1)]
+        x = self.dropout(x)
+
+        # Add sentence embeddings here
+        #print(sentence_embeddings)
+        #raise
+        #print(len(sentence_embeddings))
+        sentence_emb = self._llm_forward(sentence_embeddings)
+        sentence_emb = self.sentence_proj(sentence_emb) # Lets also try with/without
+
+        # Get data embedding
+        if(isinstance(self.x_channel_proj, SpatialTemporalEncoder2D)):
+            # Definitely not ideal... can rework if results are better
+            coeffs = img[:,-5:]
+            grid = img[:,-7:-5]
+            data = img[:,:-7]
+            data = torch.cat((data, coeffs), dim=1).flatten(2,3).permute(0,2,1)
+            grid = grid.flatten(2,3).permute(0,2,1)
+
+            x_emb = self.x_proj(data, input_pos=grid).permute(0,2,1)
+            x_emb = self.proj_down(x_emb)[...,0]
+        else:
+            x_emb = self.x_channel_proj(self.x_emb_proj(x)[...,0])
+
+        ### Normalize embeddings
+        sentence_emb = F.normalize(sentence_emb, p=2, dim=-1)
+        x_emb = F.normalize(x_emb, p=2, dim=-1)
+
+        if(return_embedding):
+            cross_corr = x_emb @ sentence_emb.T
+            #cross_corr = x_emb @ x_emb.T
+            return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1), cross_corr
+
+        if(clip):
+            #print(x_emb.shape, sentence_emb.shape)
+            #print(sentence_embeddings)
+            #raise
+            cross_corr = x_emb @ sentence_emb.T
+            #cross_corr = x_emb @ x_emb.T
+            #print(cross_corr.shape)
+            #raise
+            return cross_corr
+        else:
+            #print()
+            #print()
+            #print(x_emb.shape, sentence_emb.shape)
+            #print()
+            #print()
+            embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)
+            #embedding = sentence_emb.unsqueeze(1).clone()
+
+            #embedding = embedding.detach() if(self.pretrained) else embedding
+            x = torch.cat((x, embedding), dim=1)
+            #x = torch.cat((x, sentence_emb.unsqueeze(1)), dim=1)
+            #raise
+
+        # Transformer forward
+        #print(x.shape)
+        x = self.transformer(x)
+        #print(x.shape)
+        
+        # Remove class token
+        x = x[:,:-2]
+        #print(x.shape)
+
+        #TODO: Automate this based on patch size, not image size...
+        hw = (self.image_size//4)-1
+        #hw = 15
+
+        x = rearrange(x, 'b (h w) c -> b c h w', h=hw, w=hw)
+        x = self.unpatchify(x)
+        #print(x.shape)
+        #raise
+
+        # No pooling.
+        #x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+
+        x = self.final_proj_down(x.permute(0,2,3,1)).permute(0,3,1,2)
+        
+        return x.unsqueeze(-1)
+
+
+    def finished_pretraining(self):
+        self.pretrained = True
+
+
+class old_LLMCLIPViT(nn.Module):
     def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64,
                  dropout = 0., emb_dropout = 0., llm=None, device='cuda'):
         super().__init__()

@@ -26,7 +26,7 @@ from models.deeponet import DeepONet2D
 from models.fno import FNO2d
 from models.transolver import EmbeddingTransolver
 
-from helpers import get_data, get_transformer, get_loss, get_dpot_loss, as_rollout, ar_rollout
+from helpers import get_data, get_transformer, get_loss, get_dpot_loss, as_rollout, ar_rollout, get_pretraining_loss
 from metrics import metric_func
 
 import sys
@@ -82,127 +82,91 @@ def val_plots(ep, val_loader, preds, path="progress_plots", seed=None):
             im_num += 1
 
 
-def get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn, times=None):
-    # Select data for input and target
-    if(config['train_style'] == 'next_step'):
-        steps = torch.Tensor(np.random.choice(range(config['initial_step'], config['sim_time']),
-                             x0.shape[0])).long()
-        try:
-            y = torch.cat([x0[idx,i][None,None] for idx, i in enumerate(steps)], dim=0)
-            x0 = torch.cat([x0[idx,i-config['initial_step']:i][None] for idx, i in enumerate(steps    )], dim=0)
-        except IndexError:
-            print(steps)
-            print(x0.shape)
-            raise
-
-        y = y.permute(0,2,3,1)
-        x0 = x0.permute(0,2,3,1) if(len(x0.shape) == 4) else x0.unsqueeze(-1)
-    elif(config['train_style'] == 'fixed_future'):
-        y = x0[:, config['sim_time']]
-        x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
-    elif(config['train_style'] == 'arbitrary_step'):
-        # Generate random slices
-        steps = torch.Tensor(np.random.choice(range(config['initial_step'], config['sim_time']+1),
-                             x0.shape[0])).long()
-        y = torch.cat([x0[idx,i][None,None] for idx, i in enumerate(steps)], dim=0)
-        t = torch.cat([times[i][None] for idx, i in enumerate(steps)], dim=0)
-
-        # Use initial condition and stack target time
-        x0 = x0[:,:config['initial_step']]
-        if(times is None):
-            raise ValueError("Need target times to stack with data.")
-        x0 = torch.cat((x0, t[:,None,None,None].broadcast_to(x0.shape[0], 1, x0.shape[2], x0.shape[3])), axis=1)
-
-        # Reorder dimensions
-        y = y.permute(0,2,3,1)
-        x0 = x0.permute(0,2,3,1) if(len(x0.shape) == 4) else x0.unsqueeze(-1)
-
-    # Put data on correct device
-    x0 = x0.to(device).float()
-    y = y.to(device).float()
-    grid = grid.to(device).float()
-    if(not isinstance(sentence_embeddings, tuple)):
-        sentence_embeddings = sentence_embeddings.to(device).float()
-
-    if(config['coeff']):
-
-        # Get all coefficients
-        nu = coeffs['nu'].unsqueeze(-1)
-        ax = coeffs['ax'].unsqueeze(-1)
-        ay = coeffs['ay'].unsqueeze(-1)
-        cx = coeffs['cx'].unsqueeze(-1)
-        cy = coeffs['cy'].unsqueeze(-1)
-
-        # Stack coefficients together
-        coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],
-                                                                                               x0.shape[2], 5)
-        # Stack data and coefficients (TODO: Do we really need grid information for ViT?)
-        inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
-    else:
-        inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
-
-    # Forward pass
-    y_pred = transformer(inp, sentence_embeddings, clip=True)
-    labels = generate_pretraining_labels(config, coeffs, y_pred)
-    loss = loss_fn(y_pred, labels)
-    return loss
-
-
 def save_embeddings(config, path, transformer, loader, train=True, seed=0):
     embs = []
     all_coeffs = []
     all_sim_mats = []
     transformer.eval()
+    print("\nSAVING {} EMBEDDINGS\n".format("TRAIN" if(train) else "TEST"))
     with torch.no_grad():
-        for bn, (x0, grid, coeffs, sentence_embeddings) in enumerate(loader):
-            if(config['train_style'] == 'next_step'):
-                raise ValueError("Not Implemented Yet.")
-            elif(config['train_style'] == 'fixed_future'):
-                x0 = x0[:, :config['initial_step']].permute(0, 2, 3, 1)
-            elif(config['train_style'] == 'arbitrary_step'):
-                # Generate random slices
-                steps = torch.Tensor(np.random.choice(range(config['initial_step'], config['sim_time']+1),
-                                     x0.shape[0])).long()
-                y = torch.cat([x0[idx,i][None,None] for idx, i in enumerate(steps)], dim=0)
-                t = torch.cat([times[i][None] for idx, i in enumerate(steps)], dim=0)
+        for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(loader):
 
-                # Use initial condition and stack target time
-                x0 = x0[:,:config['initial_step']]
-                if(times is None):
-                    raise ValueError("Need target times to stack with data.")
-                x0 = torch.cat((x0, t[:,None,None,None].broadcast_to(x0.shape[0], 1, x0.shape[2], x0.shape[3])), axis=1)
+            steps = torch.Tensor(np.random.choice(range(config['initial_step'], config['sim_time']), x0.shape[0])).long()
+            y = torch.cat([x0[idx,:,:,i][None] for idx, i in enumerate(steps)], dim=0)
+            x0 = torch.cat([x0[idx,:,:,i-config['initial_step']:i][None] for idx, i in enumerate(steps)], dim=0).flatten(3,4)
+            t = None
+            if(config['time']):
+                #sentence_embeddings = torch.cat([sentence_embeddings[idx,i][None] for idx, i in enumerate(steps)], dim=0)
+                if(not config['sentence']):
+                    sentence_embeddings = torch.cat([sentence_embeddings[idx,i][None] for idx, i in enumerate(steps)], dim=0)
+                else:
+                    sentence_embeddings = [sentence_embeddings[i][idx] for idx, i in enumerate(steps)]
 
-                # Reorder dimensions
-                #y = y.permute(0,2,3,1)
-                x0 = x0.permute(0,2,3,1) if(len(x0.shape) == 4) else x0.unsqueeze(-1)
 
-            if(config['coeff']):
-                nu = coeffs['nu'].unsqueeze(-1)
-                ax = coeffs['ax'].unsqueeze(-1)
-                ay = coeffs['ay'].unsqueeze(-1)
-                cx = coeffs['cx'].unsqueeze(-1)
-                cy = coeffs['cy'].unsqueeze(-1)
-                coeff = torch.cat((nu,ax,ay,cx,cy), dim=-1).reshape(nu.shape[0], 1, 1, 5).broadcast_to(x0.shape[0], x0.shape[1],     x0.shape[2], 5)
-                inp = torch.cat((x0, grid, coeff), dim=-1).permute(0,3,1,2)
+            # Put data on correct device
+            if(config['coeff']): # Stack coefficients
+                # Fix size of coefficients
+                original_coeffs = coeffs.clone()
+                coeffs = coeffs[:,None,None,:].tile(1, x0.shape[1], x0.shape[2], 1)
+        
+                # Stack coefficients onto values
+                if(len(x0.shape) == 5): # Hacked together
+                    x0 = x0.flatten(3,4)
+                x0 = torch.cat((x0, coeffs), dim=-1)#.permute(0,3,1,2)
             else:
-                inp = torch.cat((x0, grid), dim=-1).permute(0,3,1,2)
-
-            emb, sim_mat = transformer(inp, sentence_embeddings, False, True) # Get stacked embeddings
-
+                original_coeffs = coeffs.clone()
+    
+            # Forward pass
+            #y_pred = transformer(x0, sentence_embeddings, clip=True, ep=ep)
+            emb, sim_mat = transformer(x0, sentence_embeddings, return_embedding=True)
             embs.append(emb)
-            all_coeffs.append(torch.vstack(list(coeffs.values())).transpose(0,1))
+            all_coeffs.append(coeffs)
+            all_sim_mats.append(sim_mat.unsqueeze(0))
 
-            # Need to find a way to exclude last batch
-            if(sim_mat.shape[0] == config['pretraining_batch_size']):
-                all_sim_mats.append(sim_mat.unsqueeze(0))
+        ##data = loader.dataset.data
+        ##coeff = loader.dataset.coeff
+        ### Do batch per equation -> Embeddings look like trash when all from same equation
+        ##for idx in range(loader.dataset.coeff.shape[0]):
+        ##    
+        ##    start = idx * len(loader.dataset.dsets[idx].sentence_embeddings)
+        ##    end = (idx+1) * len(loader.dataset.dsets[idx].sentence_embeddings)
 
-    all_embs = torch.cat(embs, dim=0)
-    all_coeffs = torch.cat(all_coeffs, dim=0)
-    all_sim_mats = torch.cat(all_sim_mats, dim=0)
+        ##    inp = data[start:end]
+        ##    #print(inp.shape)
+        ##    for i in range(inp.shape[3] - config['initial_step']):
+        ##        x0 = inp[...,i:i+config['initial_step'],:].flatten(3,4)
+
+        ##        c = coeff[idx].unsqueeze(0)
+        ##        s_emb = loader.dataset.dsets[idx].sentence_embeddings
+
+        ##        # Stack coefficients
+        ##        if(config['coeff']): # Stack coefficients
+        ##            # Fix size of coefficients
+        ##            coeffs = coeffs[:,None,None,:].tile(1, x0.shape[1], x0.shape[2], 1)
+        ##        
+        ##            # Stack coefficients onto values
+        ##            if(len(x0.shape) == 5): # Hacked together
+        ##                x0 = x0.flatten(3,4)
+        ##            x0 = torch.cat((x0, coeffs), dim=-1)#.permute(0,3,1,2)
+        ##        else:
+        ##            if(len(x0.shape) == 5): # Hacked together
+        ##                x0 = x0.flatten(3,4)
+
+        ##        emb, sim_mat = transformer(x0, s_emb, return_embedding=True)
+        ##        embs.append(emb)
+        ##        all_coeffs.append(c)
+        ##        all_sim_mats.append(sim_mat.unsqueeze(0))
 
     split = "train" if(train) else "val"
+
+    all_embs = torch.cat(embs, dim=0)
     np.save("./{}/pretraining_{}_embeddings_{}.npy".format(path, split, seed), all_embs.cpu().numpy())
+
+    all_coeffs = torch.cat(all_coeffs, dim=0)
     np.save("./{}/pretraining_{}_coeffs_{}.npy".format(path, split, seed), all_coeffs.cpu().numpy())
+
+    all_sim_mats = [a for a in all_sim_mats if(a.shape == all_sim_mats[0].shape)]
+    all_sim_mats = torch.cat(all_sim_mats, dim=0)
     np.save("./{}/pretraining_{}_sim_mats_{}.npy".format(path, split, seed), all_sim_mats.cpu().numpy())
 
 
@@ -239,10 +203,9 @@ def run_pretraining(config, prefix, model="vit"):
     # training and evaluation
     ################################################################
 
-    _data, _, _, _ = next(iter(train_loader))
+    _data, _, _, _, _ = next(iter(train_loader))
     dimensions = len(_data.shape)
     print('Spatial Dimension', dimensions - 3)
-
 
     # Use Adam as the optimizer.
     optimizer = torch.optim.Adam(transformer.parameters(), lr=config['pretraining_learning_rate'],
@@ -269,7 +232,7 @@ def run_pretraining(config, prefix, model="vit"):
         for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(train_loader):
             start = time.time()
             loss = get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
-                                        times=train_loader.dataset.t)
+                                        times=train_loader.dataset.dt, ep=epoch)
 
             # Do optimizer and scheduler steps
             optimizer.zero_grad()
@@ -287,7 +250,7 @@ def run_pretraining(config, prefix, model="vit"):
             val_loss = 0
             for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(val_loader):
                 loss = get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
-                                            times=val_loader.dataset.t)
+                                            times=val_loader.dataset.dt, ep=epoch)
                 val_loss += loss.item()
 
             # Save best model so far
@@ -320,10 +283,11 @@ def run_pretraining(config, prefix, model="vit"):
 
     # Save the embeddings
     if(seed == 0):
-        if(config['train_style'] == 'fixed_future'):
-            save_embeddings(config, path, transformer, train_loader, seed=seed, train=True)
-            save_embeddings(config, path, transformer, val_loader, seed=seed, train=False)
+        #if(config['train_style'] == 'fixed_future'):
+        save_embeddings(config, path, transformer, train_loader, seed=seed, train=True)
+        save_embeddings(config, path, transformer, val_loader, seed=seed, train=False)
 
+    print("\nDONE WITH SMALL SCALE TESTING\n")
     return transformer, pretrained_model_path
 
 
@@ -546,7 +510,8 @@ if __name__ == '__main__':
         model_name = 'transolver'
         config_name = "transolver_2d_config.yaml"
     elif(sys.argv[1] == 'vit'):
-        model_name = 'clipvit'
+        #model_name = 'clipvit'
+        model_name = 'llmvit'
         config_name = "lucidrains_2d_vit_config.yaml"
     elif(sys.argv[1] == 'pitt'):
         model_name = 'pitt'
@@ -562,6 +527,11 @@ if __name__ == '__main__':
     with open("./configs/{}".format(config_name), 'r') as stream:
         config = yaml.safe_load(stream)
 
+    # Pick between full LLM training and just projection head
+    if(sys.argv[1] == 'vit' and config['args']['sentence']):
+        model_name = 'llmvit'
+    elif(sys.argv[1] == 'vit' and not config['args']['sentence']):
+        model_name = 'clipvit'
 
     # Get arguments and get rid of unnecessary ones
     train_args = config['args']
@@ -569,9 +539,11 @@ if __name__ == '__main__':
              train_args['pretraining_loss'] + "_" + train_args['llm']
     prefix += "_bcs" if(train_args['bcs']) else ""
     prefix += "_coeff" if(train_args['coeff']) else ""
+    prefix += "_eqcoeff" if(train_args['eq_coeff']) else ""
     prefix += "_transfer" if(train_args['transfer']) else ""
     prefix += "_sentence" if(train_args['sentence']) else ""
     prefix += "_qualitative" if(train_args['qualitative']) else ""
+    prefix += "_time" if(train_args['time']) else ""
     prefix += "_DEBUG" if(train_args['DEBUG']) else ""
 
     train_args['prefix'] = prefix
@@ -582,10 +554,14 @@ if __name__ == '__main__':
     # Loop over number of samples TODO: ns = -1 is not supported in autoregressive rollout
     #for ns in [10, 20, 50, 100]:
     #for ns in [10]:
-    for ns in [10, 20, 50]:#, 100]:
+    #for ns in [10, 20, 50, 100, 200]:#, 100]:
+    #for ns in [100, 200]:
+    #for ns in [10, 20, 50, 100, 200, 500]:
     #for ns in [20, 50]:#, 100]:
     #for ns in [50]:#, 100]:
-    #for ns in [100]:
+    #for ns in [10]:
+    #for ns in [50]:
+    for ns in [100]:
 
         train_args['num_samples'] = ns
         train_args['num_data_samples'] = ns
@@ -627,7 +603,8 @@ if __name__ == '__main__':
                 pretrained_model_path = None
             else:
                 model, pretrained_model_path = run_pretraining(train_args, prefix, model=model_name)
-                print("\n\nPRETRIANED MODEL PATH: {}\n\n".format(pretrained_model_path))
+                model.finished_pretraining()
+                print("\n\nPRETRAINED MODEL PATH: {}\n\n".format(pretrained_model_path))
 
             torch.manual_seed(seed)
             np.random.seed(seed)
@@ -647,13 +624,16 @@ if __name__ == '__main__':
                            'cfd_rand_0.1_1e-8_1e-8', 'cfd_rand_1.0_0.01_0.01', 'cfd_rand_1.0_0.1_0.1', 'cfd_rand_1.0_1e-8_1e-8',
                            'cfd_turb_0.1_1e-8_1e-8', 'cfd_turb_1.0_1e-8_1e-8']:
 
+                torch.cuda.empty_cache()
                 if(train_args['DEBUG']):
                     train_args['dataset'] = 'cfd_rand_0.1_0.01_0.01'
                     train_args['num_data_samples'] = 50
                 else:
                     print("\nDATA: {}\n".format(subset))
                     train_args['dataset'] = subset
-                    train_args['num_data_samples'] = 20*ns
+                    #train_args['num_data_samples'] = 1000
+                    #train_args['num_data_samples'] = 500
+                    train_args['num_data_samples'] = 50
 
                 ###
                 #  Either load from transfer learning path (standard training on combined data set) or from pretrained path
@@ -665,13 +645,16 @@ if __name__ == '__main__':
                 elif(pretrained_model_path is not None):
                     print("\nFINE TUNING FROM: {}\n".format(pretrained_model_path))
                     model.load_state_dict(torch.load(pretrained_model_path)['model_state_dict'])
+                torch.cuda.empty_cache()
 
                 if(not train_args['DEBUG']):
                     print("\nDOING ZERO-SHOT EVALUATION\n")
                     zero_shot_evaluate(model, train_args, seed, prefix, subset=train_args['dataset'])
+                torch.cuda.empty_cache()
 
                 print("\nFINE TUNING ON INDIVIDUAL DATA SET\n")
                 model_path = run_training(model, train_args, prefix, seed, subset=train_args['dataset'])
+                torch.cuda.empty_cache()
 
                 if(train_args['DEBUG']):
                     break

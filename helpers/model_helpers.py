@@ -73,7 +73,7 @@ def get_transformer(model_name, config):
         ).to(device)
 
     elif(model_name == 'vit'):
-        print("USING STANDARD VISION TRANSFORMER WITH: {}\n".format(config['llm']))
+        print("USING STANDARD VISION TRANSFORMER WITH: {} CHANNELS\n".format(channels))
         transformer = ViT(
                    image_size=config['img_size'],
                    patch_size=config['patch_size'],
