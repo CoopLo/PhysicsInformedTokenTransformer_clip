@@ -41,6 +41,7 @@ args:
     clip: True
     coeff: False       # Whether or not we use coefficient information
     #coeff: True       # Whether or not we use coefficient information
+    eq_coeff: True
 
     # Whether or not we add boundary condition information into text description
     #bcs: False
@@ -58,6 +59,8 @@ args:
     pretraining_loss: 'clip'
     #pretraining_loss: 'weightedclip' # Or weightedclip or None
     llm: 'None'
+
+    time: True
     
     attention_type: 'galerkin'
 

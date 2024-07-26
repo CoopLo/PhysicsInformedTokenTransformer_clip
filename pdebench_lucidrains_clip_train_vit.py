@@ -14,7 +14,7 @@ import os
 import shutil
 from loss_funcs import LpLoss
 
-from models.pitt import StandardPhysicsInformedTokenTransformer2D, LLMPITT2D
+from models.pitt import StandardPhysicsInformedTokenTransformer2D, LLMPITT2D, E2ELLMPITT2D
 from models.pitt import PhysicsInformedTokenTransformer2D
 from models.pitt import CLIPPhysicsInformedTokenTransformer2D
 
@@ -23,17 +23,39 @@ from models.lucidrains_vit import ViT, CLIPViT, LLMCLIPViT
 
 from models.oformer import OFormer2D, SpatialTemporalEncoder2D, STDecoder2D, PointWiseDecoder2D
 from models.deeponet import DeepONet2D
-from models.fno import FNO2d
+from models.fno import FNO2d, CLIPFNO2d
 from models.transolver import EmbeddingTransolver
+from models.factformer import LLMFactFormer2D
 
 from helpers import get_data, get_transformer, get_loss, get_dpot_loss, as_rollout, ar_rollout, get_pretraining_loss
 from metrics import metric_func
 
 import sys
 
-device = 'cuda' if(torch.cuda.is_available()) else 'cpu'
 
+###
+# Multi-gpu 
+###
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+import os
+
+device = 'cuda' if(torch.cuda.is_available()) else 'cpu'
 DEBUG = True
+
+
+def ddp_setup(rank: int, world_size: int):
+    """
+    Args:
+        rank: Unique identifier of each process
+       world_size: Total number of processes
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    torch.cuda.set_device(rank)
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 def progress_plots(ep, y_train_true, y_train_pred, y_val_true, y_val_pred, path="progress_plots", seed=None, subset=None):
     ncols = 4
@@ -118,7 +140,12 @@ def save_embeddings(config, path, transformer, loader, train=True, seed=0):
     
             # Forward pass
             #y_pred = transformer(x0, sentence_embeddings, clip=True, ep=ep)
-            emb, sim_mat = transformer(x0, sentence_embeddings, return_embedding=True)
+            if(isinstance(transformer, LLMFactFormer2D)):
+                emb, sim_mat = transformer(x0, grid, 1, sentence_embeddings, return_embedding=True)
+            elif(isinstance(transformer, CLIPFNO2d)):
+                emb, sim_mat = transformer(x0, grid, sentence_embeddings, return_embedding=True)
+            else:
+                emb, sim_mat = transformer(x0, sentence_embeddings, return_embedding=True)
             embs.append(emb)
             all_coeffs.append(coeffs)
             all_sim_mats.append(sim_mat.unsqueeze(0))
@@ -170,7 +197,11 @@ def save_embeddings(config, path, transformer, loader, train=True, seed=0):
     np.save("./{}/pretraining_{}_sim_mats_{}.npy".format(path, split, seed), all_sim_mats.cpu().numpy())
 
 
-def run_pretraining(config, prefix, model="vit"):
+#def run_pretraining(config, prefix, model="vit"):
+def run_pretraining(rank, world_size, config, prefix, model="vit", seed=0):
+    print("SETTING UP DDP")
+    #ddp_setup(rank, world_size)
+
     path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
     pretrained_path = "{}{}/{}".format(config['pretrained_model_path'], config['pretraining_num_samples'],
                                        prefix)
@@ -181,6 +212,8 @@ def run_pretraining(config, prefix, model="vit"):
 
     # Create the transformer model.
     transformer = get_transformer(model, config)
+    #model = DDP(transformer, device_ids=[0])
+
     if(config['pretraining_num_samples'] == 0):
         print("\nNO PRETRAINING\n")
         return transformer, None
@@ -229,10 +262,31 @@ def run_pretraining(config, prefix, model="vit"):
         train_loss = 0
         max_val = 0
         transformer.train()
+
+        #train_loader.sampler.set_epoch(epoch)
+
         for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(train_loader):
             start = time.time()
-            loss = get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
-                                        times=train_loader.dataset.dt, ep=epoch)
+            sentence_embeddings = sentence_embeddings if(isinstance(sentence_embeddings, list)) else \
+                                  sentence_embeddings.to(device='cuda:1') if(not isinstance(transformer, (CLIPFNO2d, LLMFactFormer2D, LLMPITT2D))) else \
+                                  sentence_embeddings.to(device='cuda:0')
+            loss = get_pretraining_loss(
+                          config,
+                          transformer,
+                          x0.to(device='cuda:0'),
+                          grid.to(device='cuda:0'),
+                          coeffs.to(device='cuda:0'),
+                          #sentence_embeddings.to(device='cuda:1'),
+                          sentence_embeddings,
+                          loss_fn,
+                          times=train_loader.dataset.dt.cuda(),
+                          ep=epoch
+            )
+
+            del x0
+            del grid
+            del coeffs
+            torch.cuda.empty_cache()
 
             # Do optimizer and scheduler steps
             optimizer.zero_grad()
@@ -249,9 +303,27 @@ def run_pretraining(config, prefix, model="vit"):
             transformer.eval()
             val_loss = 0
             for bn, (x0, grid, coeffs, dt, sentence_embeddings) in enumerate(val_loader):
-                loss = get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddings, loss_fn,
-                                            times=val_loader.dataset.dt, ep=epoch)
+                sentence_embeddings = sentence_embeddings if(isinstance(sentence_embeddings, list)) else \
+                                      sentence_embeddings.to(device='cuda:1') if(not isinstance(transformer, (CLIPFNO2d, LLMFactFormer2D, LLMPITT2D))) else \
+                                      sentence_embeddings.to(device='cuda:0')
+                loss = get_pretraining_loss(
+                              config,
+                              transformer,
+                              x0.to(device='cuda:0'),
+                              grid.to(device='cuda:0'),
+                              coeffs.to(device='cuda:0'),
+                              #sentence_embeddings.to(device='cuda:1'),
+                              sentence_embeddings,
+                              loss_fn,
+                              times=val_loader.dataset.dt.cuda(),
+                              ep=epoch
+                )
                 val_loss += loss.item()
+
+                del x0
+                del grid
+                del coeffs
+                torch.cuda.empty_cache()
 
             # Save best model so far
             if  val_loss < loss_val_min:
@@ -302,12 +374,19 @@ def evaluate(test_loader, transformer, loss_fn, config=None):
             #                                                                           sentence_embeddings=sentence_embeddings,
             #                                                                           times=test_loader.dataset.dt,
             #                                                                           evaluate=True)
-            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_dpot_loss(config, 1, transformer, x0, grid,
-                                                                                       coeffs,
-                                                                                       loss_fn,
-                                                                                       sentence_embeddings=sentence_embeddings,
-                                                                                       times=test_loader.dataset.dt,
-                                                                                       evaluate=True)
+            if(not isinstance(transformer, E2ELLMPITT2D)):
+                sentence_embeddings = sentence_embeddings if(isinstance(sentence_embeddings, list)) else \
+                                  sentence_embeddings.to(device='cuda:1') if(not isinstance(transformer, (CLIPFNO2d, LLMFactFormer2D, LLMPITT2D, E2ELLMPITT2D))) else \
+                                  sentence_embeddings.to(device='cuda:0')
+                                  #sentence_embeddings.to(device='cuda:1') if(not isinstance(transformer, LLMPITT2D)) else \
+            y_pred, y, loss, err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = get_dpot_loss(config, 1, transformer,
+                                                                                    x0.to(device='cuda:0'),
+                                                                                    grid.to(device='cuda:0'),
+                                                                                    coeffs.to(device='cuda:0'),
+                                                                                    loss_fn,
+                                                                                    sentence_embeddings=sentence_embeddings,
+                                                                                    times=test_loader.dataset.dt.to(device='cuda:0'),
+                                                                                    evaluate=True)
             test_loss += loss.item()
 
             metrics['RMSE'].append(err_RMSE)
@@ -359,6 +438,57 @@ def zero_shot_evaluate(transformer, config, seed, prefix, subset='Heat,Burger,Ad
     return test_loss/(bn+1)
 
 
+def freeze_llm(transformer, train_loader, val_loader, test_loader):
+    if(isinstance(train_loader.dataset, MultiDataset)):
+        print("Updating train loader...")
+        for dset in tqdm(train_loader.dataset.dsets):
+            s_emb = []
+            for sentence in dset.sentence_embeddings:
+                s_emb.append(transformer._llm_forward([sentence]).detach())
+            s_emb = torch.cat(s_emb, dim=0)
+            dset.sentence_embeddings = s_emb
+
+        print("Updating val loader...")
+        for dset in tqdm(val_loader.dataset.dsets):
+            s_emb = []
+            for sentence in dset.sentence_embeddings:
+                s_emb.append(transformer._llm_forward([sentence]).detach())
+            s_emb = torch.cat(s_emb, dim=0)
+            dset.sentence_embeddings = s_emb
+
+        print("Updating test loader...")
+        for dset in tqdm(test_loader.dataset.dsets):
+            s_emb = []
+            for sentence in dset.sentence_embeddings:
+                s_emb.append(transformer._llm_forward([sentence]).detach())
+            s_emb = torch.cat(s_emb, dim=0)
+            dset.sentence_embeddings = s_emb
+
+    else:
+        print("Updating train loader...")
+        s_emb = []
+        for sentence in train_loader.dataset.sentence_embeddings:
+            s_emb.append(transformer._llm_forward([sentence]).detach())
+        s_emb = torch.cat(s_emb, dim=0)
+        train_loader.dataset.sentence_embeddings = s_emb
+
+        print("Updating val loader...")
+        s_emb = []
+        for sentence in val_loader.dataset.sentence_embeddings:
+            s_emb.append(transformer._llm_forward([sentence]).detach())
+        s_emb = torch.cat(s_emb, dim=0)
+        val_loader.dataset.sentence_embeddings = s_emb
+
+        print("Updating val loader...")
+        s_emb = []
+        for sentence in test_loader.dataset.sentence_embeddings:
+            s_emb.append(transformer._llm_forward([sentence]).detach())
+        s_emb = torch.cat(s_emb, dim=0)
+        test_loader.dataset.sentence_embeddings = s_emb
+
+    return train_loader, val_loader, test_loader
+
+
 def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
     path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
     model_name = 'vit' + "_{}.pt".format(seed)
@@ -366,11 +496,19 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
         model_name = subset + "_" + model_name
     model_path = path + "/" + model_name
 
+    #if(subset == 'all'):
+    #    return model_path
+
     total_params = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
     print(f'Total parameters = {total_params}')
 
     # Get data as loaders
     train_loader, val_loader, test_loader = get_data(config)
+
+    # Freeze LLM by updating sentence embeddings
+    if(isinstance(transformer, E2ELLMPITT2D) and subset != 'all'):
+        train_loader, val_loader, test_loader = freeze_llm(transformer, train_loader,
+                                                           val_loader, test_loader)
 
     ################################################################
     # training and evaluation
@@ -405,9 +543,20 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
             #y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, loss_fn,
             #                           sentence_embeddings=sentence_embeddings,
             #                           times=train_loader.dataset.dt)
-            y_pred, y, loss = get_dpot_loss(config, epoch, transformer, x0, grid, coeffs, loss_fn,
-                                       sentence_embeddings=sentence_embeddings,
-                                       times=train_loader.dataset.dt)
+            if(isinstance(sentence_embeddings, torch.Tensor)):
+                sentence_embeddings = sentence_embeddings if(isinstance(sentence_embeddings, list)) else \
+                                      sentence_embeddings.to(device='cuda:1') if(not isinstance(transformer, (CLIPFNO2d, LLMFactFormer2D, LLMPITT2D, E2ELLMPITT2D))) else \
+                                      sentence_embeddings.to(device='cuda:0')
+            y_pred, y, loss = get_dpot_loss(
+                                         config,
+                                         epoch,
+                                         transformer,
+                                         x0.to(device='cuda:0'),
+                                         grid.to(device='cuda:0'),
+                                         coeffs.to(device='cuda:0'),
+                                         loss_fn,
+                                         sentence_embeddings=sentence_embeddings,
+                                         times=train_loader.dataset.dt.to(device='cuda:0'))
 
             # Backward pass: compute gradient of the loss with respect to model
             optimizer.zero_grad()
@@ -436,9 +585,24 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
                     #y_pred, y, loss = get_loss(config, transformer, x0, grid, coeffs, loss_fn,
                     #                           sentence_embeddings=sentence_embeddings,
                     #                           times=train_loader.dataset.dt)
-                    y_pred, y, loss = get_dpot_loss(config, epoch, transformer, x0, grid, coeffs, loss_fn,
-                                               sentence_embeddings=sentence_embeddings,
-                                               times=train_loader.dataset.dt)
+                    #y_pred, y, loss = get_dpot_loss(config, epoch, transformer, x0, grid, coeffs, loss_fn,
+                    #                           sentence_embeddings=sentence_embeddings,
+                    #                           times=train_loader.dataset.dt)
+                    if(isinstance(sentence_embeddings, torch.Tensor)):
+                        sentence_embeddings = sentence_embeddings if(isinstance(sentence_embeddings, list)) else \
+                                              sentence_embeddings.to(device='cuda:1') if(not isinstance(transformer, (CLIPFNO2d, LLMFactFormer2D, LLMPITT2D, E2ELLMPITT2D))) else \
+                                              sentence_embeddings.to(device='cuda:0')
+                    y_pred, y, loss = get_dpot_loss(
+                                                 config,
+                                                 epoch,
+                                                 transformer,
+                                                 x0.to(device='cuda:0'),
+                                                 grid.to(device='cuda:0'),
+                                                 coeffs.to(device='cuda:0'),
+                                                 loss_fn,
+                                                 sentence_embeddings=sentence_embeddings,
+                                                 times=train_loader.dataset.dt.to(device='cuda:0'))
+
                     all_val_preds.append(y_pred.detach())
 
                     val_loss += loss.item()
@@ -493,7 +657,7 @@ def run_training(transformer, config, prefix, seed, subset='heat,adv,burger'):
         as_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=seed)
     elif(config['train_style'] == 'next_step'):
         print("\nPREFIX: {}\n".format(prefix))
-        ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=seed)
+        #ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=seed)
 
     return model_path
 
@@ -519,6 +683,12 @@ if __name__ == '__main__':
     elif(sys.argv[1] == 'dpot'):
         model_name = 'llmdpot'
         config_name = "dpot_2d_config.yaml"
+    elif(sys.argv[1] == 'factformer'):
+        model_name = 'llmfactformer'
+        config_name = "factformer_2d_config.yaml"
+    elif(sys.argv[1] == 'fno'):
+        model_name = 'llmfno'
+        config_name = "fno_2d_config.yaml"
     else:
         print("Using ViT by default.")
         model_name = 'vit'
@@ -562,6 +732,7 @@ if __name__ == '__main__':
     #for ns in [10]:
     #for ns in [50]:
     for ns in [100]:
+    #for ns in [1000]:
 
         train_args['num_samples'] = ns
         train_args['num_data_samples'] = ns
@@ -602,13 +773,19 @@ if __name__ == '__main__':
             if(train_args['DEBUG']):
                 pretrained_model_path = None
             else:
-                model, pretrained_model_path = run_pretraining(train_args, prefix, model=model_name)
+                model, pretrained_model_path = run_pretraining(1, 1, train_args, prefix, model=model_name)
+
+                #world_size = torch.cuda.device_count()
+                #print("WORLD SIZE: {}".format(world_size))
+                #mp.spawn(run_pretraining, args=(world_size, train_args, prefix, model_name, seed,), nprocs=world_size)
+
                 model.finished_pretraining()
                 print("\n\nPRETRAINED MODEL PATH: {}\n\n".format(pretrained_model_path))
 
             torch.manual_seed(seed)
             np.random.seed(seed)
             model = get_transformer(model_name, train_args)
+            model.finished_pretraining()
             if(pretrained_model_path is not None):
                 model.load_state_dict(torch.load(pretrained_model_path)['model_state_dict'])
 
@@ -620,9 +797,10 @@ if __name__ == '__main__':
             #if(train_args['transfer']):
             #for subset in ['diffusion_reaction', 'cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
             #for subset in ['cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
+            #for subset in ['shallow_water']:
             for subset in ['shallow_water', 'diffusion_reaction', 'cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
                            'cfd_rand_0.1_1e-8_1e-8', 'cfd_rand_1.0_0.01_0.01', 'cfd_rand_1.0_0.1_0.1', 'cfd_rand_1.0_1e-8_1e-8',
-                           'cfd_turb_0.1_1e-8_1e-8', 'cfd_turb_1.0_1e-8_1e-8']:
+                           'cfd_turb_0.1_1e-8_1e-8', 'cfd_turb_1.0_1e-8_1e-8', 'heat', 'burger', 'adv']:
 
                 torch.cuda.empty_cache()
                 if(train_args['DEBUG']):
@@ -631,9 +809,9 @@ if __name__ == '__main__':
                 else:
                     print("\nDATA: {}\n".format(subset))
                     train_args['dataset'] = subset
-                    #train_args['num_data_samples'] = 1000
+                    train_args['num_data_samples'] = 1000
                     #train_args['num_data_samples'] = 500
-                    train_args['num_data_samples'] = 50
+                    #train_args['num_data_samples'] = 50
 
                 ###
                 #  Either load from transfer learning path (standard training on combined data set) or from pretrained path
@@ -647,9 +825,9 @@ if __name__ == '__main__':
                     model.load_state_dict(torch.load(pretrained_model_path)['model_state_dict'])
                 torch.cuda.empty_cache()
 
-                if(not train_args['DEBUG']):
-                    print("\nDOING ZERO-SHOT EVALUATION\n")
-                    zero_shot_evaluate(model, train_args, seed, prefix, subset=train_args['dataset'])
+                #if(not train_args['DEBUG']):
+                #    print("\nDOING ZERO-SHOT EVALUATION\n")
+                #    zero_shot_evaluate(model, train_args, seed, prefix, subset=train_args['dataset'])
                 torch.cuda.empty_cache()
 
                 print("\nFINE TUNING ON INDIVIDUAL DATA SET\n")

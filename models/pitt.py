@@ -25,6 +25,8 @@ from .oformer import SpatialTemporalEncoder2D, PointWiseDecoder2D
 from .oformer import Encoder1D, STDecoder1D, PointWiseDecoder1D
 from .deeponet import DeepONet2D
 
+from sentence_transformers import SentenceTransformer
+
 
 class PositionalEncoding(nn.Module):
 
@@ -1175,7 +1177,8 @@ class LLMPITT2D(nn.Module):
             self.vh_embedding_layer = PatchEmbed(img_size=self.img_size, patch_size=8, in_chans=data_channels,
                                                  embed_dim=hidden_dim, out_dim=hidden_dim, act='gelu')
             self.vh_unembedding_layer = nn.Sequential(
-                nn.ConvTranspose2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=8, stride=8),
+                #nn.ConvTranspose2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=8, stride=8),
+                nn.ConvTranspose2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=4, stride=4),
                 nn.GELU(),
                 nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=1, stride=1),
                 nn.GELU(),
@@ -1183,19 +1186,19 @@ class LLMPITT2D(nn.Module):
             )
             print("USING CONVOLUTIONAL EMBEDDING STRATEGY")
         elif(self.embedding_type == 'fc'):
-        	self.vh_embedding_layer = nn.Linear(self.img_size*self.img_size*self.data_channels, input_dim)#, bias=False)
-        	self.vh_unembedding_layer = nn.Linear(input_dim, self.img_size*self.img_size*self.data_channels)#, bias=False)
+            self.vh_embedding_layer = nn.Linear(self.img_size*self.img_size*self.data_channels, input_dim)#, bias=False)
+            self.vh_unembedding_layer = nn.Linear(input_dim, self.img_size*self.img_size*self.data_channels)#, bias=False)
 
-        	# Output decoding layer
-        	self.output_layers = nn.Sequential(
-        	             nn.Linear(hidden_dim, hidden_dim),
-        	             nn.GELU(),
-        	             nn.Dropout(dropout),
-        	             nn.Linear(hidden_dim, hidden_dim),
-        	             nn.GELU(),
-        	             nn.Dropout(dropout),
-        	             nn.Linear(hidden_dim, 1)
-        	)
+            # Output decoding layer
+            self.output_layers = nn.Sequential(
+                         nn.Linear(hidden_dim, hidden_dim),
+                         nn.GELU(),
+                         nn.Dropout(dropout),
+                         nn.Linear(hidden_dim, hidden_dim),
+                         nn.GELU(),
+                         nn.Dropout(dropout),
+                         nn.Linear(hidden_dim, 1)
+            )
         else:
             raise ValueError("Choose either 'conv' or 'fc' for embedding. Currently: {}".format(self.embedding))
 
@@ -1254,7 +1257,13 @@ class LLMPITT2D(nn.Module):
     def forward(self, queries, keys, values, t):#, mask):
 
         # Physics Model Forward
+        #print()
+        #print()
+        #print(values.shape, queries.shape)
         x = self.neural_operator(values, queries)
+        #print(x.shape)
+        #print()
+        #print()
 
         # Get difference between physics model output and input
         dx = x - values[...,-self.data_channels:]
@@ -1296,13 +1305,208 @@ class LLMPITT2D(nn.Module):
 
         # Project embedding to output size
         if(self.embedding_type == 'conv'):
+            #print()
+            #print()
+            #print(vh.shape)
+            vh = rearrange(vh, 'b (h w) c -> b c h w', h=16, w=16) # Make this not hard coded?
+            #vh = rearrange(vh, 'b (h w) c -> b c h w', h=8, w=8) # Make this not hard coded?
+            #print(vh.shape)
+            out = self.vh_unembedding_layer(vh).permute(0,2,3,1)
+            #print(out.shape)
+            #print()
+            #print()
+            #raise
+        elif(self.embedding_type == 'fc'):
+             vh = torch.swapaxes(self.vh_unembedding_layer(torch.swapaxes(vh, 1, 2)), 1, 2)
+             out = self.output_layers(vh)[...,0].reshape((x.shape[0], x.shape[1], x.shape[2], self.data_channels))
+
+        #print(values.shape, x.shape, out.shape)
+        #raise
+        return x + out
+
+
+    def finished_pretraining(self):
+        pass
+
+
+class E2ELLMPITT2D(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_heads, img_size, neural_operator, dropout=0.1, data_channels=1,
+                 embedding_type='conv', llm='all-MiniLM-L6-v2'):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.img_size = img_size
+        self.hidden_dim = hidden_dim
+        self.data_channels = data_channels
+        self.embedding_type = embedding_type
+
+        self.embedding = torch.nn.Embedding(input_dim, hidden_dim)
+        self.pos_encoding = PositionalEncoding(hidden_dim, dropout)
+
+        # Get input processing
+        self.llm = llm
+        self.llm_model = SentenceTransformer(llm, device='cuda:0')
+        #self.k_embedding_layer = nn.Linear(768, input_dim)
+        #self.k_embedding_layer = nn.Linear(384, input_dim)
+        self.k1_embedding_layer = nn.Linear(384, input_dim)
+        self.k2_embedding_layer = nn.Linear(384, input_dim)
+
+        if(self.embedding_type == 'conv'):
+            self.vh_embedding_layer = PatchEmbed(img_size=self.img_size, patch_size=8, in_chans=data_channels,
+                                                 embed_dim=hidden_dim, out_dim=hidden_dim, act='gelu')
+            self.vh_unembedding_layer = nn.Sequential(
+                #nn.ConvTranspose2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=8, stride=8),
+                nn.ConvTranspose2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=4, stride=4),
+                nn.GELU(),
+                nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=1, stride=1),
+                nn.GELU(),
+                nn.Conv2d(in_channels=hidden_dim, out_channels=self.data_channels, kernel_size=1, stride=1)
+            )
+            print("USING CONVOLUTIONAL EMBEDDING STRATEGY")
+        elif(self.embedding_type == 'fc'):
+            self.vh_embedding_layer = nn.Linear(self.img_size*self.img_size*self.data_channels, input_dim)#, bias=False)
+            self.vh_unembedding_layer = nn.Linear(input_dim, self.img_size*self.img_size*self.data_channels)#, bias=False)
+
+            # Output decoding layer
+            self.output_layers = nn.Sequential(
+                         nn.Linear(hidden_dim, hidden_dim),
+                         nn.GELU(),
+                         nn.Dropout(dropout),
+                         nn.Linear(hidden_dim, hidden_dim),
+                         nn.GELU(),
+                         nn.Dropout(dropout),
+                         nn.Linear(hidden_dim, 1)
+            )
+        else:
+            raise ValueError("Choose either 'conv' or 'fc' for embedding. Currently: {}".format(self.embedding))
+
+
+        # Query and value processing
+        self.v_embedding_layer = nn.Linear(np.prod(self.vh_embedding_layer.out_size), input_dim)#, bias=False)
+
+        # Internal Physics Model
+        self.neural_operator = neural_operator
+
+        # Dropout and layer number specification
+        self.dropout = nn.Dropout(dropout)
+        self.num_layers = num_layers
+
+        # Maybe give the option for multiple layers
+        self.feval_mhls = torch.nn.ModuleList()
+        self.t_embeddings = torch.nn.ModuleList()
+        self.updates = torch.nn.ModuleList()
+        self.updates_h = torch.nn.ModuleList()
+        for l in range(self.num_layers):
+
+            # For updating state
+            self.feval_mhls.append(LinearAttention(input_dim=hidden_dim, attn_type='galerkin',
+                                      heads=num_heads, dim_head=hidden_dim, dropout=dropout,
+                                      relative_emb=False,
+                                      init_method='xavier',
+                                      init_gain=1.
+            ))
+
+            # Embedding time
+            self.t_embeddings.append(torch.nn.Linear(1, input_dim))
+
+            # NN Update
+            self.updates.append(nn.Sequential(
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.SiLU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim)
+            ))
+
+            # NN Update
+            self.updates_h.append(nn.Sequential(
+                                       nn.Linear(hidden_dim+1, hidden_dim),
+                                       nn.GELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim),
+                                       nn.GELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(hidden_dim, hidden_dim)
+            ))
+
+
+    @torch.enable_grad()
+    def _llm_forward(self, sentence):
+        tokenized_sentences = self.llm_model.tokenize(sentence)
+        for key, val in tokenized_sentences.items():
+            tokenized_sentences[key] = val.to(self.llm_model.device)
+        output = self.llm_model(tokenized_sentences)['sentence_embedding']
+        return output
+
+
+    def forward(self, queries, keys, values, t):#, mask):
+
+        # Physics Model Forward
+        if(isinstance(keys, tuple)):
+            keys = self._llm_forward(keys)
+
+        x = self.neural_operator(values, queries)
+
+        # Get difference between physics model output and input
+        dx = x - values[...,-self.data_channels:]
+
+        # Match dimension from LLM output
+        #kh1 = self.k_embedding_layer(keys)
+        kh1 = self.k1_embedding_layer(keys)
+        kh1 = self.embedding(kh1.long()) * np.sqrt(self.hidden_dim)
+        kh1 = self.pos_encoding(kh1)
+
+        kh2 = self.k2_embedding_layer(keys)
+        kh2 = self.embedding(kh2.long()) * np.sqrt(self.hidden_dim)
+        kh2 = self.pos_encoding(kh2)
+
+        # Embed values from neural operator output
+        vh = self.vh_embedding_layer(dx.permute(0,3,1,2)).flatten(2,3)
+        vh = self.v_embedding_layer(vh).permute(0,2,1)
+
+        # Use FNO embedding
+        vh_old = vh.clone()
+
+        # Embed time
+        t = t.unsqueeze(1).unsqueeze(1)
+        t_frac = t/self.num_layers
+
+        # Numerical-like updates
+        for l in range(self.num_layers):
+
+            # LLM-driven update operator
+            #update, _ = self.feval_mhls[l](kh1, vh_old, vh_old)  # Trying old data + embedding as operator
+            update, _ = self.feval_mhls[l](kh1, kh2, vh_old)  # Trying old data + embedding as operator
+            update = self.dropout(update)
+
+            # Embed time and add to update 
+            t_h = self.t_embeddings[l](t_frac).permute(0,2,1)
+            up_t = torch.cat((update, t_h), dim=-1)
+            up_th = self.updates_h[l](up_t)
+
+            # Add update to old state
+            vh = vh_old + up_th
+            vh_old = vh.clone()
+
+            # Increment time
+            t_frac = t_frac + t/self.num_layers
+
+        # Project embedding to output size
+        if(self.embedding_type == 'conv'):
             vh = rearrange(vh, 'b (h w) c -> b c h w', h=16, w=16) # Make this not hard coded?
             out = self.vh_unembedding_layer(vh).permute(0,2,3,1)
         elif(self.embedding_type == 'fc'):
              vh = torch.swapaxes(self.vh_unembedding_layer(torch.swapaxes(vh, 1, 2)), 1, 2)
              out = self.output_layers(vh)[...,0].reshape((x.shape[0], x.shape[1], x.shape[2], self.data_channels))
 
+        #print(x.shape, out.shape)
         return x + out
+
+
+    def finished_pretraining(self):
+        pass
 
 
 class CLIPPhysicsInformedTokenTransformer2D(nn.Module):

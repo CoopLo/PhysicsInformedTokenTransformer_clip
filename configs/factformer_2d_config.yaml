@@ -9,16 +9,42 @@ args:
     #results_dir: './long_pretrain_weighted_fixed/'
     #results_dir: './tune_long_pretrain_weighted_fixed/'
     #results_dir: './noise_long_pretrain_weighted_fixed/'
-    results_dir: './PARALLEL_TEST/'
     
-    #train_style: 'next_step'
-    train_style: 'fixed_future'
+    pretrained_model_path: "./FACTFORMER_PRETRAINED_MODELS/"
+    
+    results_dir: './veryfinetune_PARALLEL_TEST/'
+    #results_dir: './test_PARALLEL_TEST/'
+    #
+    dataset: 'all'
+    pretraining_loss: 'clip'
+    clip: True
+
+    # Pick llm
+    llm: 'all-mpnet-base-v2'
+    #llm: 'all-MiniLM-L6-v2'
+
+    normalize: False
+    bcs: False
+    coeff: False
+    eq_coeff: False
+    time: False
+    qualitative: False
+    sentence: False
+
+    pushforward: 1
+    t_bundle: 1
+
+    train_style: 'next_step'
+    #train_style: 'fixed_future'
     num_workers: 0
-    batch_size: 32
-    pretraining_batch_size: 256
-    initial_step: 10
+    batch_size: 64
+    pretraining_batch_size: 128
+
+    #initial_step: 1
+    initial_step: 5
     #initial_step: 20
     #initial_step: 41
+    #
     t_train: 200
     validate: 1
     #data_name: '2d_ns_1s_256_4eq.h5'
@@ -38,7 +64,6 @@ args:
     #embedding: 'oformerllm'
     llm: 'all-MiniLM-L6-v2'
     #llm: 'all-mpnet-base-v2'
-    coeff: True
     load_pretrained: True
 
     # CLIP
@@ -47,29 +72,35 @@ args:
     detach: False
 
     # Optimizer
-    learning_rate: 1.e-3
-    weight_decay: 1.e-4
+    learning_rate: 1.e-5
+    weight_decay: 1.e-9
     scheduler_step: 20
     scheduler_gamma: 0.5
-    epochs: 500
+
+    epochs: 1000
+    #epochs: 1
+
     #epochs: 10
     #epochs: 500
     num_seeds: 1
 
-    pretraining_learning_rate: 1.e-4
-    pretraining_weight_decay: 1.e-8
-    #pretraining_epochs: 1000
-    pretraining_epochs: 200
+    pretraining_learning_rate: 1.e-3
+    pretraining_weight_decay: 1.e-4
+    #pretraining_epochs: 10
+    #pretraining_epochs: 200
+    pretraining_epochs: 2000
 
     # Sim samples
-    im_size: 32
+    img_size: 128
+    #img_size: 64
+    #img_size: 16
     num_t: 100
     #num_x: 64
     #num_y: 64
     num_x: 100
     num_y: 60
 
-    sim_time: 40
+    sim_time: 21
     #sim_time: 80
     #sim_time: 120
     #sim_time: 999
@@ -78,20 +109,29 @@ args:
     #num_samples: 500
     #num_samples: 1000
     #num_samples: 2000
-    pretraining_num_samples: 10
+    pretraining_num_samples: 50
+    #pretraining_num_samples: 100
+    #pretraining_num_samples: 300
 
     samples_per_equation: 1
     #samples_per_equation: 5
 
-    # FNO
-    num_channels: 1
-    modes1: 4
-    modes2: 4
-    width: 32
-    #dropout: 0.001
+    # FactFormer
+    depth: 1
+    dim: 64
+    dim_head: 64
+    heads: 4
+    in_dim: 4
+    out_dim: 4
+    pos_in_dim: 2
+    pos_out_dim: 2
+    kernel_multiplier: 2
+    latent_multiplier: 2.0
+    max_latent_steps: 4
+
     dropout: 0.01
-    #dropout: 0.1
 
     # Tracking
     log_freq: 10
     progress_plot_freq: 50
+

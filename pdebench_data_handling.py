@@ -160,6 +160,8 @@ import math as mt
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
+from anthony_data_handling import PDEDataset2D
+
 class FNODatasetSingle(Dataset):
     def __init__(self, filename,
                  initial_step=10,
@@ -439,7 +441,7 @@ class FNODatasetSingle(Dataset):
         # Time steps used as initial conditions
         self.initial_step = initial_step
         self.data = self.data if torch.is_tensor(self.data) else torch.tensor(self.data)
-        self.tsteps_t = torch.tensor(self.tsteps_t)
+        self.tsteps_t = torch.tensor(self.tsteps_t).clone()
         self.sim_time = len(self.tsteps_t) if(self.sim_time == -1) else self.sim_time
 
         self.dt = self.tsteps_t[1] - self.tsteps_t[0] * torch.ones(len(self.tsteps_t)).unsqueeze(0)
@@ -447,7 +449,7 @@ class FNODatasetSingle(Dataset):
         # Need to add empty data channels when doing transfer learning because base model has 4
         ds = self.data.shape
         if((self.transfer or self.finetune) and ds[-1] != 4):
-            self.data = torch.cat((self.data, torch.zeros(ds[0], ds[1], ds[2], ds[3], 4-ds[-1])), dim=-1)
+            self.data = torch.cat((self.data, torch.zeros(ds[0], ds[1], ds[2], ds[3], 4-ds[-1]).to(device=self.data.device)), dim=-1)
 
         # Add sentence embeddings
         if(self.clip or self.sentence):
@@ -579,6 +581,8 @@ class FNODatasetSingle(Dataset):
             # Need a way to get this to work with loader...
             self.sentence_embeddings = self.sentences
 
+        torch.cuda.empty_cache()
+
         print("Done.")
 
     def __len__(self):
@@ -708,65 +712,110 @@ class MultiDataset(Dataset):
 
         for fname, saved_folder in zip(filenames, saved_folders):
             print(fname, saved_folder)
-            self.dsets.append(FNODatasetSingle(
-                    filename=fname,
-                    saved_folder=saved_folder,
-                    initial_step=initial_step,
-                    reduced_resolution=reduced_resolution,
-                    reduced_resolution_t=reduced_resolution_t,
-                    reduced_batch=reduced_batch,
-                    if_test=if_test,
-                    test_ratio=test_ratio,
-                    num_samples_max=num_samples_max,
-                    sim_time=sim_time,
+            if(fname in ['heat', 'burger', 'adv']):
+                d_file = "/home/cooperlorsung/NEW_HeatAdvBurgers_{}_downsampled.h5".format(3072 if(if_test) else 9216)
+                s_fac = 0.2 if(if_test) else 0.8
+                print("\n\nCLIP: {}\n\n".format(clip))
+                self.dsets.append(PDEDataset2D(
+                        path="/home/cooperlorsung/NEW_HeatAdvBurgers_9216_downsampled.h5",
+                        pde="Heat, Burgers, Advection",
+                        mode="train",
+                        resolution=[sim_time,64,64],
+                        augmentation=[],
+                        augmentation_ratio=0.0,
+                        shift='None',
+                        load_all=False,
+                        device='cuda:0',
+                        num_samples=int(s_fac*num_samples_max),
+                        clip=clip,
+                        llm=llm,
+                        subset=fname,
+                ))
 
-                    clip=clip,
-                    llm=llm,
-                    bcs=bcs,
-                    sentence=sentence,
-                    coeff=coeff,
-                    eq_coeff=eq_coeff,
-                    qualitative=qualitative,
-                    time=time,
+            else:
+                self.dsets.append(FNODatasetSingle(
+                        filename=fname,
+                        saved_folder=saved_folder,
+                        initial_step=initial_step,
+                        reduced_resolution=reduced_resolution,
+                        reduced_resolution_t=reduced_resolution_t,
+                        reduced_batch=reduced_batch,
+                        if_test=if_test,
+                        test_ratio=test_ratio,
+                        num_samples_max=num_samples_max,
+                        sim_time=sim_time,
 
-                    image_size=image_size,
+                        clip=clip,
+                        llm=llm,
+                        bcs=bcs,
+                        sentence=sentence,
+                        coeff=coeff,
+                        eq_coeff=eq_coeff,
+                        qualitative=qualitative,
+                        time=time,
 
-                    normalize=normalize,
-                    finetune=False
-            ))
+                        image_size=image_size,
+
+                        normalize=normalize,
+                        finetune=False
+                ))
 
             # Need to adjust resolution and timeframe... try down first, then try up if its an issue, I suppose
             #TODO See if interpolating is any better.
-            if(self.dsets[-1].data.shape[-1] == 1):  # Shallow water case
+            if(isinstance(self.dsets[-1], PDEDataset2D)):
+                data = self.dsets[-1].get_data()
+                shape = list(data.shape)
+                shape[-1] = 3
+                data = torch.cat((data.cpu(), torch.zeros(shape).cpu()), dim=-1)
+                data = data[:,:,:,:sim_time]
+                self.data.append(data)
+
+            elif(self.dsets[-1].data.shape[-1] == 1):  # Shallow water case
                 shape = list(self.dsets[-1].data.shape)
                 shape[-1] = 3
-                data = torch.cat((self.dsets[-1].data, torch.zeros(shape)), dim=-1)
-                data = data[:,:,:,:21]
+                data = torch.cat((self.dsets[-1].data.cpu(), torch.zeros(shape).cpu()), dim=-1)
+                data = data[:,:,:,:sim_time]
                 self.data.append(data)
 
             elif(self.dsets[-1].data.shape[-1] == 2): # Works because we only need to go to 4
-                data = torch.cat((self.dsets[-1].data, torch.zeros(self.dsets[-1].data.shape)), dim=-1)
-                data = data[:,:,:,:21]
+                data = torch.cat((self.dsets[-1].data.cpu(), torch.zeros(self.dsets[-1].data.shape).cpu()), dim=-1)
+                data = data[:,:,:,:sim_time]
                 self.data.append(data)
 
             else:  # CFD case
                 if(self.dsets[-1].data.shape[1] in [256, 512]):
-                    self.data.append(self.dsets[-1].data[:,::4,::4,:])
+                    self.data.append(self.dsets[-1].data[:,::4,::4,:].cpu())
                 else:
-                    self.data.append(self.dsets[-1].data)
+                    self.data.append(self.dsets[-1].data.cpu())
 
-            if(self.dsets[-1].grid.shape[0] in [256, 512]):
-                self.grids.append(self.dsets[-1].grid[::4,::4].unsqueeze(0))
+            if(isinstance(self.dsets[-1], PDEDataset2D)):
+                self.grids.append(self.dsets[-1].x.unsqueeze(0).cpu().permute(0,2,3,1))
+
+            elif(self.dsets[-1].grid.shape[0] in [256, 512]):
+                self.grids.append(self.dsets[-1].grid[::4,::4].unsqueeze(0).cpu())
             else:
-                self.grids.append(self.dsets[-1].grid.unsqueeze(0))
+                self.grids.append(self.dsets[-1].grid.unsqueeze(0).cpu())
 
-            self.dt.append(self.dsets[-1].dt[:,:21])
-            self.coeff.append(self.dsets[-1].coeffs.unsqueeze(0))
+            # Hard coded to 21 so each data set is the same size
+            self.dt.append(self.dsets[-1].dt[:,:sim_time].cpu())
+            if(len(self.dsets[-1].coeffs.shape) == 1):
+                coeff = self.dsets[-1].coeffs.unsqueeze(0).unsqueeze(0).cpu()
+                samples = self.data[-1].shape[0]
+                coeff = coeff.broadcast_to((1, samples, 5))
+                self.coeff.append(coeff)
+            else:
+                self.coeff.append(self.dsets[-1].coeffs.unsqueeze(0).cpu())
+
+            #del self.dsets[-1].data
+            #del self.dsets[-1].grid
+            #del self.dsets[-1].coeff
+            #del self.dsets[-1].dt
 
         self.dt = torch.cat(self.dt, dim=0).cuda()
         self.data = torch.cat(self.data, dim=0).cuda()
         self.grids = torch.cat(self.grids, dim=0).cuda()
         self.coeff = torch.cat(self.coeff, dim=0).cuda()
+        torch.cuda.empty_cache()
 
 
     def __len__(self):

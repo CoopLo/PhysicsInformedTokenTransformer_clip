@@ -1,5 +1,12 @@
 import torch
 from pdebench_data_handling import FNODatasetSingle, FNODatasetMult, MultiDataset
+from anthony_data_handling import PDEDataset2D
+
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+import os
 
 
 def _get_filename_and_extension(config):
@@ -97,7 +104,10 @@ def _get_filename_and_extension(config):
                 '2D_CFD_Rand_M1.0_Eta0.1_Zeta0.1_periodic_128_Train.hdf5',
                 '2D_CFD_Rand_M1.0_Eta1e-08_Zeta1e-08_periodic_512_Train.hdf5',
                 '2D_CFD_Turb_M0.1_Eta1e-08_Zeta1e-08_periodic_512_Train.hdf5',
-                '2D_CFD_Turb_M1.0_Eta1e-08_Zeta1e-08_periodic_512_Train.hdf5'
+                '2D_CFD_Turb_M1.0_Eta1e-08_Zeta1e-08_periodic_512_Train.hdf5',
+                'heat',
+                'burger',
+                'adv',
         ]
 
         paths = [
@@ -110,10 +120,14 @@ def _get_filename_and_extension(config):
                 'CFD/2D_Train_Rand',
                 'CFD/2D_Train_Rand',
                 'CFD/2D_Train_Turb',
-                'CFD/2D_Train_Turb'
+                'CFD/2D_Train_Turb',
+                '', '', '',
         ]
         extension = ["/home/cooperlorsung/pdebench_data/2D/{}".format(i) for i in paths]
 
+    elif(any(sub in config['dataset'] for sub in ['heat', 'burger', 'adv'])):
+        filename = config['dataset']
+        extension = ''
 
     else:
         raise NotImplementedError("Select shallow_water, diffusion_reaction, or one of the incompressible CFD datasets for now.")
@@ -122,83 +136,116 @@ def _get_filename_and_extension(config):
 
 
 def get_single_dataset(config, filename, extension, pretraining=False):
-    train_data = FNODatasetSingle(
-            filename=filename,
-            saved_folder="/home/cooperlorsung/pdebench_data/2D/{}".format(extension),
-            initial_step=config['initial_step'],
-            reduced_resolution=config['reduced_resolution'],
-            reduced_resolution_t=config['reduced_resolution_t'],
-            reduced_batch=1,
-            if_test=False,
-            test_ratio=0.2,
-            num_samples_max=config['num_data_samples'],
+    # Condtiion for PDEBench datasets
+    if(filename not in ['heat', 'adv', 'burger']):
+        train_data = FNODatasetSingle(
+                filename=filename,
+                saved_folder="/home/cooperlorsung/pdebench_data/2D/{}".format(extension),
+                initial_step=config['initial_step'],
+                reduced_resolution=config['reduced_resolution'],
+                reduced_resolution_t=config['reduced_resolution_t'],
+                reduced_batch=1,
+                if_test=False,
+                test_ratio=0.2,
+                num_samples_max=config['num_data_samples'],
 
-            clip=config['clip'],
-            llm=config['llm'],
-            bcs=config['bcs'],
-            coeff=config['coeff'],
-            eq_coeff=config['eq_coeff'],
-            sentence=config['sentence'],
-            qualitative=config['qualitative'],
-            time=config['time'],
-            image_size=config['img_size'],
+                clip=config['clip'],
+                llm=config['llm'],
+                bcs=config['bcs'],
+                coeff=config['coeff'],
+                eq_coeff=config['eq_coeff'],
+                sentence=config['sentence'],
+                qualitative=config['qualitative'],
+                time=config['time'],
+                image_size=config['img_size'],
 
-            transfer=config['transfer'],
-            
-            normalize=config['normalize'],
-    )
-    val_data = FNODatasetSingle(
-            filename=filename,
-            saved_folder="/home/cooperlorsung/pdebench_data/2D/{}".format(extension),
-            initial_step=1,
-            reduced_resolution=config['reduced_resolution'],
-            reduced_resolution_t=config['reduced_resolution_t'],
-            reduced_batch=1,
-            if_test=True,
-            test_ratio=0.2,
-            num_samples_max=config['num_data_samples'],
+                transfer=config['transfer'],
+                
+                normalize=config['normalize'],
+        )
+        val_data = FNODatasetSingle(
+                filename=filename,
+                saved_folder="/home/cooperlorsung/pdebench_data/2D/{}".format(extension),
+                initial_step=1,
+                reduced_resolution=config['reduced_resolution'],
+                reduced_resolution_t=config['reduced_resolution_t'],
+                reduced_batch=1,
+                if_test=True,
+                test_ratio=0.2,
+                num_samples_max=config['num_data_samples'],
 
-            clip=config['clip'],
-            llm=config['llm'],
-            bcs=config['bcs'],
-            coeff=config['coeff'],
-            eq_coeff=config['eq_coeff'],
-            sentence=config['sentence'],
-            qualitative=config['qualitative'],
-            time=config['time'],
-            image_size=config['img_size'],
+                clip=config['clip'],
+                llm=config['llm'],
+                bcs=config['bcs'],
+                coeff=config['coeff'],
+                eq_coeff=config['eq_coeff'],
+                sentence=config['sentence'],
+                qualitative=config['qualitative'],
+                time=config['time'],
+                image_size=config['img_size'],
 
-            transfer=config['transfer'],
+                transfer=config['transfer'],
 
-            normalize=config['normalize'],
-    )
-    test_data = FNODatasetSingle(
-            filename=filename,
-            saved_folder="/home/cooperlorsung/pdebench_data/2D/{}".format(extension),
-            initial_step=1,
-            reduced_resolution=config['reduced_resolution'],
-            reduced_resolution_t=config['reduced_resolution_t'],
-            reduced_batch=1,
-            if_test=True,
-            test_ratio=0.2,
-            num_samples_max=config['num_data_samples'],
+                normalize=config['normalize'],
+        )
+    else:
+        print("\n\nFILENAME: {}\n\n".format(filename))
+        subset = 'heat' if('heat' in filename) else 'burger' if('burger' in filename) else 'adv' if('adv' in filename) \
+                 else 'heat,adv,buger'
+        train_data = PDEDataset2D(
+                path="/home/cooperlorsung/NEW_HeatAdvBurgers_9216_downsampled.h5",
+                pde="Heat, Burgers, Advection",
+                mode="train",
+                resolution=[config['sim_time'],64,64],
+                augmentation=[],
+                augmentation_ratio=0.0,
+                shift='None',
+                load_all=False,
+                device='cuda:0',
+                num_samples=int(0.8*config['num_samples']),
+                clip=config['clip'],
+                llm=config['llm'],
+                #downsample=config['downsample'],
+                subset=subset,
+                #debug=DEBUG,
+        )
+        val_data = PDEDataset2D(
+                path="/home/cooperlorsung/NEW_HeatAdvBurgers_3072_downsampled.h5",
+                pde="Heat, Burgers, Advection",
+                mode="train",
+                resolution=[config['sim_time'],64,64],
+                augmentation=[],
+                augmentation_ratio=0.0,
+                shift='None',
+                load_all=True,
+                device='cuda:0',
+                num_samples=int(0.2*config['num_samples']),
+                clip=config['clip'],
+                llm=config['llm'],
+                #downsample=config['downsample'],
+                subset=subset,
+                #debug=DEBUG,
+        )
+        #test_data = PDEDataset2D(
+        #        path="/home/cooperlorsung/NEW_HeatAdvBurgers_768_downsampled.h5",
+        #        pde="Heat, Burgers, Advection",
+        #        mode="valid",
+        #        resolution=[config['sim_time'],64,64],
+        #        augmentation=[],
+        #        augmentation_ratio=0.0,
+        #        shift='None',
+        #        load_all=True,
+        #        device='cuda:0',
+        #        num_samples=int(0.2*config['num_samples']),
+        #        clip=config['clip'],
+        #        llm=config['llm'],
+        #        #downsample=config['downsample'],
+        #        subset=subset,
+        #        #debug=DEBUG,
+        #)
 
-            clip=config['clip'],
-            llm=config['llm'],
-            bcs=config['bcs'],
-            coeff=config['coeff'],
-            eq_coeff=config['eq_coeff'],
-            sentence=config['sentence'],
-            qualitative=config['qualitative'],
-            time=config['time'],
-            image_size=config['img_size'],
 
-            transfer=config['transfer'],
-            
-            normalize=config['normalize'],
-    )
-
-    return train_data, val_data, test_data
+    return train_data, val_data, None
 
 
 def get_multi_dataset(config, filenames, saved_folders, pretraining=False):
@@ -253,32 +300,33 @@ def get_multi_dataset(config, filenames, saved_folders, pretraining=False):
             normalize=config['normalize'],
     )
     print("\nTEST DATA")
-    test_data = MultiDataset(
-            filenames=filenames,
-            saved_folders=saved_folders,
-            initial_step=config['initial_step'],
-            reduced_resolution=config['reduced_resolution'],
-            reduced_resolution_t=config['reduced_resolution_t'],
-            reduced_batch=1,               
-            if_test=True,
-            test_ratio=0.2,
-            num_samples_max=config['pretraining_num_samples'] if(pretraining) else config['num_data_samples'],
-            sim_time=config['sim_time'],
+    #test_data = MultiDataset(
+    #        filenames=filenames,
+    #        saved_folders=saved_folders,
+    #        initial_step=config['initial_step'],
+    #        reduced_resolution=config['reduced_resolution'],
+    #        reduced_resolution_t=config['reduced_resolution_t'],
+    #        reduced_batch=1,               
+    #        if_test=True,
+    #        test_ratio=0.2,
+    #        num_samples_max=config['pretraining_num_samples'] if(pretraining) else config['num_data_samples'],
+    #        sim_time=config['sim_time'],
 
-            clip=config['clip'],
-            llm=config['llm'],
-            coeff=config['coeff'],
-            eq_coeff=config['eq_coeff'],
-            bcs=config['bcs'],
-            sentence=config['sentence'],
-            qualitative=config['qualitative'],
-            time=config['time'],
-            image_size=config['img_size'],
-            
-            normalize=config['normalize'],
-    )
+    #        clip=config['clip'],
+    #        llm=config['llm'],
+    #        coeff=config['coeff'],
+    #        eq_coeff=config['eq_coeff'],
+    #        bcs=config['bcs'],
+    #        sentence=config['sentence'],
+    #        qualitative=config['qualitative'],
+    #        time=config['time'],
+    #        image_size=config['img_size'],
+    #        
+    #        normalize=config['normalize'],
+    #)
 
-    return train_data, val_data, test_data
+    #return train_data, val_data, test_data
+    return train_data, val_data, None
 
 
 def get_data(config, pretraining=False):
@@ -291,14 +339,28 @@ def get_data(config, pretraining=False):
 
     batch_size = config['pretraining_batch_size'] if(pretraining) else config['batch_size']
     print("\nPRETRAINING: {}\n".format(pretraining))
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
-                                               num_workers=config['num_workers'], shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size, generator=torch.Generator(device='cuda'),
-                                             num_workers=config['num_workers'], shuffle=True)
+
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size,
+                                               generator=torch.Generator(device='cuda'),
+                                               num_workers=config['num_workers'],
+                                               shuffle=True,
+                                               #sampler=DistributedSampler(train_data),
+                                               )
+    val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size,
+                                             generator=torch.Generator(device='cuda'),
+                                             num_workers=config['num_workers'],
+                                             shuffle=True,
+                                             #sampler=DistributedSampler(val_data),
+                                             )
 
     # Batch size of 1 makes it easier to evaluate only over relevant channels
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=1,
-                                             num_workers=config['num_workers'], shuffle=False)
+    #test_loader = torch.utils.data.DataLoader(test_data, batch_size=1,
+    test_loader = torch.utils.data.DataLoader(val_data, batch_size=1,
+                                              generator=torch.Generator(device='cuda'),
+                                              num_workers=config['num_workers'],
+                                              #shuffle=False,
+                                              #sampler=DistributedSampler(val_data),
+                                              )
 
     return train_loader, val_loader, test_loader
 

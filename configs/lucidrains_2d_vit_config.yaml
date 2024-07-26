@@ -4,7 +4,7 @@ args:
     #DEBUG: True
     #transfer: True
     transfer: False
-    load_pretrained: True
+    load_pretrained: False
 
     #results_dir: './VITT_TEST/'
     #results_dir: './HOPEFUL_PUSHFORWARD_VIT_TEST/'
@@ -17,11 +17,14 @@ args:
     #results_dir: './BIG_PATCH_PUSHFORWARD_FINAL_RESULTS/'
     #
     #results_dir: './FINAL_TEST/'
-    results_dir: './FIRST_FINAL_RESULTS/'
+    #results_dir: './FIRST_FINAL_RESULTS/'
+    #results_dir: './SMALL_FIRST_FINAL_RESULTS_oformer/'
+    results_dir: './SMALL_PARALLEL_TEST/'
 
     #pretrained_model_path: "./PDEBENCH_QUALITATIVE_PRETRAINED_MODELS/"
     #pretrained_model_path: "./_PDEBENCH_QUALITATIVE_PRETRAINED_MODELS/"
-    pretrained_model_path: "./FIRST_FINAL_PDEBENCH_PRETRAINED_MODELS/"
+    #pretrained_model_path: "./FIRST_FINAL_PDEBENCH_PRETRAINED_MODELS/"
+    pretrained_model_path: "./PARALLEL_TEST_PRETRAINED_MODELS/"
 
     model: 'pitt' 
     neural_operator: 'fno' # fno, oformer, deeponet
@@ -32,7 +35,7 @@ args:
     train_style: 'next_step'
     t_bundle: 1
     pushforward: 1
-    initial_step: 5
+    initial_step: 1
     num_seeds: 1
     
     ###
@@ -70,44 +73,50 @@ args:
     ###
     # Choose level of sentence information
     ###
-    #llm: 'all-mpnet-base-v2'
-    llm: 'all-MiniLM-L6-v2'
+    llm: 'all-mpnet-base-v2'
+    #llm: 'all-MiniLM-L6-v2'
 
     #bcs: False         # Whether or not we add boundary condition information into text description
     bcs: True           # Whether or not we add boundary condition information into text description
 
     # TODO: Explore adding coefficient information only to sentences, not additional channels
     coeff: False        # Whether or not we use coefficient information as input condition
-    eq_coeff: True        # Whether or not we use coefficient information in text
+    #eq_coeff: True        # Whether or not we use coefficient information in text
+    eq_coeff: False        # Whether or not we use coefficient information in text
     
     #qualitative: False  # Whether or not we incorporate qualitative information into text description.
     qualitative: True  # Whether or not we incorporate qualitative information into text description.
 
-    sentence: False     # Whether or not we're returning sentences and training LLM end-to-end
-    #sentence: True     # Whether or not we're returning sentences and training LLM end-to-end
+    #sentence: False     # Whether or not we're returning sentences and training LLM end-to-end
+    sentence: True     # Whether or not we're returning sentences and training LLM end-to-end
 
     # If we add target simulation time to the sentence embedding
-    time: False
-    #time: True
+    #time: False
+    time: True
     
     # Training Optimizer
     epochs: 1000
+    batch_size: 16
     #batch_size: 32
-    batch_size: 64
+    #batch_size: 64
     #batch_size: 128
     learning_rate: 1.e-3
     weight_decay: 1.e-8
-    sim_time: 21
+    #sim_time: 21
+    sim_time: 10
     num_samples: 100
 
     # Pretraining Optimizer
     #pretraining_num_samples: 0
-    pretraining_num_samples: 200
+    pretraining_num_samples: 1000
+    #pretraining_num_samples: 500
+    #pretraining_num_samples: 50
     #pretraining_num_samples: 10
     pretraining_epochs: 1000
-    pretraining_batch_size: 128
-    pretraining_learning_rate: 1.e-4
-    pretraining_weight_decay: 1.e-8
+    #pretraining_batch_size: 128
+    pretraining_batch_size: 64
+    pretraining_learning_rate: 1.e-3
+    pretraining_weight_decay: 1.e-9
 
     # Tracking
     validate: 1
@@ -119,8 +128,8 @@ args:
     ###
     # ViT Parameters
     #downsample: 1
-    img_size: 128
-    #img_size: 64
+    #img_size: 128
+    img_size: 64
     #img_size: 32
     patch_size: 8
     patch_stride: 8 # Works if stride >= patch_size/2? Not exactly sure...

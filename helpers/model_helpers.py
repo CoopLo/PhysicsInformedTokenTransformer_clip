@@ -1,10 +1,18 @@
 import torch
-from models.fno import FNO2d
-from models.pitt import StandardPhysicsInformedTokenTransformer2D, LLMPITT2D
+from models.fno import FNO2d, CLIPFNO2d
+from models.pitt import StandardPhysicsInformedTokenTransformer2D, LLMPITT2D, E2ELLMPITT2D
 from models.dpot import DPOTNet, LLMDPOTNet
 from models.lucidrains_vit import ViT, CLIPViT, LLMCLIPViT
+from models.factformer import FactFormer2D, LLMFactFormer2D
 
-def get_neural_operator(model_name, config, data_channels):
+def get_neural_operator(model_name, config, data_channels=None):
+    if(data_channels is None):
+        data_channels = 1 if(config['dataset'] == 'shallow_water') else 2 if(config['dataset'] == 'diffusion_reaction') else 4
+        data_channels = 4 #TODO: one day I'll have this all sorted out...
+
+    # Add more for coefficients
+    data_channels += 5 if(config['coeff']) else 0
+
     device = config['device']
     if(model_name == "fno"):
         # Correct for number of channels calculated earlier
@@ -24,7 +32,12 @@ def get_neural_operator(model_name, config, data_channels):
         model = DeepONet2D(layer_sizes_branch=config['branch_net'], layer_sizes_trunk=config['trunk_net'],
                                 activation=config['activation'], kernel_initializer=config['kernel_initializer'])
 
-    model.to(device)
+    elif(model_name == 'factformer'):
+        #model = FactFormer2D(dim=config['dim'], dim_head=config['dim_head'], heads=config['heads'], dim_out=config['dim_out'],
+        #                     depth=config['depth'])
+        model = FactFormer2D(config)
+
+    #model.to(device)
     return model
 
 
@@ -54,7 +67,7 @@ def get_transformer(model_name, config):
     out_channels = 1 if(config['dataset'] == 'shallow_water') else 2 if(config['dataset'] == 'diffusion_reaction') else 4
 
     # Create the transformer model.
-    if(config['sentence']):
+    if(config['sentence'] and model_name == 'vit'):
         print("USING SENTENCE CLIP VISION TRANSFORMER WITH: {}\n".format(config['llm']))
         transformer = LLMCLIPViT(
                    image_size=config['img_size'],
@@ -70,7 +83,7 @@ def get_transformer(model_name, config):
                    dropout=config['dropout'],
                    emb_dropout=config['emb_dropout'],
                    llm=config['llm'],
-        ).to(device)
+        )#.to(device)
 
     elif(model_name == 'vit'):
         print("USING STANDARD VISION TRANSFORMER WITH: {} CHANNELS\n".format(channels))
@@ -87,7 +100,7 @@ def get_transformer(model_name, config):
                    dim_head=config['dim_head'],
                    dropout=config['dropout'],
                    emb_dropout=config['emb_dropout'],
-        ).to(device)
+        )#.to(device)
 
     elif(model_name == 'clipvit'):
         print("USING CLIP VISION TRANSFORMER WITH: {}\n".format(config['llm']))
@@ -105,7 +118,7 @@ def get_transformer(model_name, config):
                    dropout=config['dropout'],
                    emb_dropout=config['emb_dropout'],
                    llm=config['llm'],
-        ).to(device)
+        )#.to(device)
 
     elif(model_name == 'transolver'):
         transformer = EmbeddingTransolver(
@@ -116,6 +129,21 @@ def get_transformer(model_name, config):
                 W=config['img_size'],
                 llm=config['llm'],
         ).to(device)
+
+    elif(config['sentence'] and model_name == 'pitt'):
+        print("\nTRAINING LLM End-to-End\n")
+        print("DATA CHANNELS: {}".format(data_channels))
+        neural_operator = get_neural_operator(config['neural_operator'], config, data_channels)
+        transformer = E2ELLMPITT2D(
+                               input_dim=config['input_dim'],
+                               hidden_dim=config['hidden'],
+                               num_layers=config['layers'],
+                               num_heads=config['heads'],
+                               img_size=config['img_size'],
+                               neural_operator=neural_operator,
+                               dropout=config['dropout'],
+                               data_channels=data_channels
+        )#.to(device=device)
 
     elif(model_name == "pitt"):
         print("\n USING STANDARD EMBEDDING")
@@ -131,7 +159,7 @@ def get_transformer(model_name, config):
                                neural_operator=neural_operator,
                                dropout=config['dropout'],
                                data_channels=data_channels
-        ).to(device=device)
+        )#.to(device=device)
 
     elif(model_name == "dpot"):
         print("\nUSING DPOT")
@@ -177,6 +205,35 @@ def get_transformer(model_name, config):
                 time_agg=config['time_agg'],
                 llm=config['llm']
         ).to(device)
+
+    elif(model_name == "llmfno"):
+        print("\n\nCLIP FNO\n\n")
+        transformer = CLIPFNO2d(data_channels, config['modes1'], config['modes2'], config['width'], initial_step=config['initial_step'],
+        #transformer = CLIPFNO2d(data_channels+5, config['modes1'], config['modes2'], config['width'], initial_step=config['initial_step'],
+                            dropout=config['dropout']).to(device)
+        #transformer = LLMDPOTNet(
+        #        img_size=config['img_size'],
+        #        patch_size=config['patch_size'],
+        #        mixing_type=config['mixing_type'],
+        #        in_channels=config['in_channels'],
+        #        out_channels=config['out_channels'],
+        #        in_timesteps=config['initial_step'],
+        #        out_timesteps=config['T_bundle'],
+        #        n_blocks=config['n_blocks'],
+        #        embed_dim=config['width'],
+        #        out_layer_dim=config['out_layer_dim'],
+        #        depth=config['depth'],
+        #        modes=config['modes'],
+        #        mlp_ratio=config['mlp_ratio'],
+        #        n_cls=config['n_cls'],
+        #        normalize=config['normalize'],
+        #        act=config['act'],
+        #        time_agg=config['time_agg'],
+        #        llm=config['llm']
+        #).to(device)
+
+    elif(model_name == 'llmfactformer'):
+        transformer = LLMFactFormer2D(config)
 
     else:
         raise ValueError("Invalid model choice.")

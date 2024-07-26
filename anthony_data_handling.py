@@ -204,6 +204,8 @@ class PDEDataset2D(Dataset):
         self.ay = torch.Tensor(self.data["ay"][:]).to(self.device)
         self.cx = torch.Tensor(self.data["cx"][:]).to(self.device)
         self.cy = torch.Tensor(self.data["cy"][:]).to(self.device)
+        self.coeffs = torch.cat((self.nu.unsqueeze(0), self.ax.unsqueeze(0),
+                                 self.ay.unsqueeze(0), self.cx.unsqueeze(0), self.cy.unsqueeze(0)), dim=0).T
 
         # Choose subset of data
         self.total_samples = len(self.u)
@@ -217,7 +219,7 @@ class PDEDataset2D(Dataset):
         self.tmin = self.t[0]
         self.tmax = self.t[-1]
         self.nt = len(self.t)
-        self.dt = (self.tmax - self.tmin) / self.nt
+        self.dt = torch.Tensor([(self.tmax - self.tmin) / (self.nt-1)]*len(self.t)).unsqueeze(0)
 
         self.xmin = self.x[0, 0, 0]
         self.xmax = self.x[0, 0, -1]
@@ -307,7 +309,7 @@ class PDEDataset2D(Dataset):
             print("Done.")
 
     def __len__(self):
-        return len(self.indexes)
+        return len(self.indexes)#*self.u.shape[1]
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, torch.Tensor]:
         """
@@ -320,20 +322,26 @@ class PDEDataset2D(Dataset):
             torch.Tensor: spatial coordinates
             list: equation specific parameters
         """
-        #u = self.u[idx]
-        #x = self.x
         original_idx = idx
+        #original_idx = idx//self.u.shape[1]
+        #slice_idx = idx%self.u.shape[1]
+        #print()
+        #print(idx, original_idx, slice_idx)
+        #print()
         idx = self.indexes[idx]
+        #idx = self.indexes[idx//self.u.shape[1]]
+        #print(idx)
+        #raise
         u = self.u[idx]
         x = self.x
         t = self.t
         
-        variables = {}
-        variables['nu'] = self.nu[idx] 
-        variables['ax'] = self.ax[idx]
-        variables['ay'] = self.ay[idx]
-        variables['cx'] = self.cx[idx]
-        variables['cy'] = self.cy[idx]
+        #variables = {}
+        #variables['nu'] = self.nu[idx] 
+        #variables['ax'] = self.ax[idx]
+        #variables['ay'] = self.ay[idx]
+        #variables['cx'] = self.cx[idx]
+        #variables['cy'] = self.cy[idx]
 
         if self.mode == "train" and self.augmentation is not None:
             if self.augmentation_ratio > random.random(): # augment data w/ probability augmentation_ratio
@@ -343,12 +351,29 @@ class PDEDataset2D(Dataset):
                 u = self.augmentation(u, pde, self.shift)
 
         if(self.clip and not self.sentence):
-            return u, x.permute(1,2,0), variables, self.sentence_embeddings[original_idx]
+            return_u = torch.cat((u.unsqueeze(-1), torch.zeros(u.shape[0], u.shape[1], u.shape[2], 3)), dim=-1)
+            return return_u, \
+                   x.permute(1,2,0), \
+                   self.coeffs[original_idx], \
+                   self.dt[0][0], \
+                   self.sentence_embeddings[original_idx]
+
         elif(self.clip and self.sentence):
             return u, x.permute(1,2,0), variables, self.sentences[original_idx]
         else:
-            #return u, x.permute(1,2,0), variables, self.sentence_embeddings[original_idx] ???
             return u, x.permute(1,2,0), variables
+
+    def get_data(self):
+        self.coeffs = self.coeffs[self.indexes]
+        try:
+            self.sentence_embeddings = torch.Tensor(self.sentence_embeddings)
+        except AttributeError:
+            self.sentence_embeddings = None
+        #print()
+        #print(type(self.sentence_embeddings))
+        #print()
+        #raise
+        return self.u[self.indexes].unsqueeze(-1)
     
 
     def get_PDE(self, variables):

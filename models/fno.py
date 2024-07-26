@@ -226,7 +226,10 @@ class FNO2d(nn.Module):
         self.w3 = nn.Conv2d(self.width, self.width, 1)
 
         self.fc1 = nn.Linear(self.width, 128)
+
+        # TODO: Make this robust to not choosing coefficient conditioning information
         self.fc2 = nn.Linear(128, num_channels)
+        #self.fc2 = nn.Linear(128, num_channels-5)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, grid):
@@ -275,6 +278,55 @@ class FNO2d(nn.Module):
         return y_pred, loss_fn(y_pred, y)
     
 
+# Take from DPOT code
+ACTIVATION = {
+        'gelu':nn.GELU(),
+        'tanh':nn.Tanh(),
+        'sigmoid':nn.Sigmoid(),
+        'relu':nn.ReLU(),
+        'leaky_relu':nn.LeakyReLU(0.1),
+        'softplus':nn.Softplus(),
+        'ELU':nn.ELU(),
+        'silu':nn.SiLU()
+}                
+class PatchEmbed(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, out_dim=128,act='gelu'):
+        super().__init__()
+        # img_size = to_2tuple(img_size)
+        # patch_size = to_2tuple(patch_size)
+        img_size = (img_size, img_size)
+                 
+        stride_size = (patch_size//2, patch_size//2)
+
+        patch_size = (patch_size, patch_size) 
+        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.num_patches = num_patches
+
+        # Need to update for overlapping patches...
+        out_size = int((self.img_size[0] + 2*0 - 1*(patch_size[0] - 1) - 1)/stride_size[0] + 1)
+        self.out_size = (out_size, out_size)
+
+        self.out_dim = out_dim
+        self.act = ACTIVATION[act]
+
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=stride_size),
+            self.act,
+            nn.Conv2d(embed_dim, out_dim, kernel_size=1, stride=1)
+        )
+        
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        assert H == self.img_size[0] and W == self.img_size[1], \
+               f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        # x = self.proj(x).flatten(2).transpose(1, 2)
+        x = self.proj(x)
+        return x
+
+
 class CLIPFNO2d(nn.Module):
     def __init__(self, num_channels, modes1=12, modes2=12, width=20, initial_step=10, dropout=0.1, embed_dim=32, llm_dim=384):
         super(CLIPFNO2d, self).__init__()
@@ -296,26 +348,42 @@ class CLIPFNO2d(nn.Module):
         self.modes2 = modes2
         self.width = width
         self.padding = 2 # pad the domain if input is non-periodic
+        self.channels = num_channels*initial_step
 
-        #self.fc0 = nn.Linear(initial_step*num_channels+2, self.width)
-        self.fc0 = nn.Linear(initial_step*num_channels+2+1, self.width)
+        self.fc0 = nn.Linear(initial_step*num_channels+2, self.width)
+        #self.fc0 = nn.Linear(initial_step*num_channels+2+1, self.width)
         #self.fc0_finetune = nn.Linear(initial_step*num_channels+2+1, self.width)
 
         # input channel is 12: the solution of the previous 10 timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
 
         self.conv0 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
-        self.conv0_finetune = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+        #self.conv0 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+        #self.conv0_finetune = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+        self.conv0_finetune = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
         self.conv1 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
         self.conv2 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
         self.conv3 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
         self.w0 = nn.Conv2d(self.width, self.width, 1)
+        #self.w0 = nn.Conv2d(self.width+1, self.width, 1)
         self.w1 = nn.Conv2d(self.width, self.width, 1)
         self.w2 = nn.Conv2d(self.width, self.width, 1)
         self.w3 = nn.Conv2d(self.width, self.width, 1)
 
-        self.fc1 = nn.Linear(self.width, 128)
+        #self.fc1 = nn.Linear(self.width, 128)
+        self.fc1 = nn.Linear(self.width+1, 128)
         self.fc2 = nn.Linear(128, num_channels)
+        #self.fc2 = nn.Linear(128, num_channels-5)
         self.dropout = nn.Dropout(dropout)
+
+        # Patch embedding
+        #self.to_patch_embedding = PatchEmbed(img_size=128, patch_size=8, in_chans=self.width,
+        #                                    embed_dim=1, out_dim=1, act='gelu')
+        #self.to_patch_embedding = PatchEmbed(img_size=130, patch_size=8, in_chans=self.width,
+        #                                    embed_dim=1, out_dim=1, act='gelu')
+        #self.to_patch_embedding = PatchEmbed(img_size=66, patch_size=8, in_chans=self.width,
+        #                                    embed_dim=1, out_dim=1, act='gelu')
+        self.to_patch_embedding = PatchEmbed(img_size=34, patch_size=8, in_chans=self.width,
+                                            embed_dim=1, out_dim=1, act='gelu')
 
         self.sentence_proj = nn.Sequential(
                                  #nn.Linear(384, embed_dim),
@@ -326,8 +394,12 @@ class CLIPFNO2d(nn.Module):
                                  nn.Linear(embed_dim, embed_dim//2)
         )
         self.x_proj = nn.Sequential(
+                                 #nn.Linear(31*31, embed_dim),
+                                 #nn.Linear(15**2, embed_dim),
+                                 nn.Linear(7**2, embed_dim),
+
                                  #nn.Linear(32**3, embed_dim),
-                                 nn.Linear((initial_step*num_channels+2)*32*32, embed_dim),
+                                 #nn.Linear((initial_step*num_channels+2)*32*32, embed_dim),
                                  #nn.Linear(32*34*34, embed_dim),
                                  #nn.Linear(32**2, embed_dim),
                                  nn.SiLU(),
@@ -340,8 +412,12 @@ class CLIPFNO2d(nn.Module):
                                  nn.SiLU(),
                                  nn.Linear(128, 256),
                                  nn.SiLU(),
-                                 nn.Linear(256, 32*32)
+                                 #nn.Linear(256, 128*128)
+                                 #nn.Linear(256, 130*130)
+                                 #nn.Linear(256, 66*66)
+                                 nn.Linear(256, 34*34)
         )
+        self.pretrained = False
 
 
     def forward(self, x, grid, sentence_embeddings, clip=False, return_embedding=False):
@@ -349,26 +425,39 @@ class CLIPFNO2d(nn.Module):
         x = torch.cat((x, grid), dim=-1)
 
         # During pretraining get embedding from model output
-        x_emb = self.x_proj(x.flatten(1,3))
+        #print(x.shape)
+        #print(x_proj)
+        #print(x.shape)
+        #x_emb = self.x_proj(x.flatten(1,3))
+
+        #raise
         sentence_emb = self.sentence_proj(sentence_embeddings)
-        if(return_embedding):
-            return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1)
-        if(clip):
-            cross_corr = torch.bmm(x_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
-            return cross_corr
-        else:
-            #x_emb = self.x_proj(x.flatten(1,3))
-            #sentence_emb = self.sentence_proj(sentence_embeddings)
-            embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)#.detach()
-            embedding = self.proj_up(embedding)
-            #print(x.shape, embedding.shape)
-            #print(embedding.reshape((512, 32, 32, 1)).shape)
-            x = torch.cat((x, embedding.reshape((x.shape[0], 32, 32, 1))), dim=-1)
-            #print(x.shape)
-            #raise
+        #if(return_embedding):
+        #    return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1)
+        #if(clip):
+        #    cross_corr = torch.bmm(x_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
+        #    return cross_corr
+        #else:
+        #    embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)#.detach()
+        #    embedding = self.proj_up(embedding)
+        #    x = torch.cat((x, embedding.reshape((x.shape[0], 32, 32, 1))), dim=-1)
 
         x = self.fc0(x)
+        #print(x.shape)
+
         x = x.permute(0, 3, 1, 2)
+        #x_emb = self.x_proj(self.to_patch_embedding(x).flatten(1,3))
+
+        #if(return_embedding):
+        #    cross_corr = x_emb @ sentence_emb.T
+        #    return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1), cross_corr
+        #if(clip):
+        #    cross_corr = x_emb @ sentence_emb.T
+        #    return cross_corr
+        #else:
+        #    embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)#.detach()
+        #    embedding = self.proj_up(embedding)
+        #    x = torch.cat((x, embedding.reshape((x.shape[0], 1, 128, 128))), dim=1)
         
         # Pad tensor with boundary condition
         x = F.pad(x, [0, self.padding, 0, self.padding])
@@ -394,6 +483,22 @@ class CLIPFNO2d(nn.Module):
         x2 = self.w3(x)
         x = x1 + x2
 
+        x_emb = self.x_proj(self.to_patch_embedding(x).flatten(1,3))
+
+        if(return_embedding):
+            cross_corr = x_emb @ sentence_emb.T
+            return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1), cross_corr
+        if(clip):
+            cross_corr = x_emb @ sentence_emb.T
+            return cross_corr
+        else:
+            embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)#.detach()
+            embedding = self.proj_up(embedding)
+            #x = torch.cat((x, embedding.reshape((x.shape[0], 1, 130, 130))), dim=1)
+            #x = torch.cat((x, embedding.reshape((x.shape[0], 1, 66, 66))), dim=1)
+            x = torch.cat((x, embedding.reshape((x.shape[0], 1, 34, 34))), dim=1)
+        #raise
+
         x = x[..., :-self.padding, :-self.padding] # Unpad the tensor
         x = x.permute(0, 2, 3, 1)
         x = self.fc1(x)
@@ -407,6 +512,10 @@ class CLIPFNO2d(nn.Module):
     def get_loss(self, x, y, grid, sentence_embeddings, loss_fn):
         y_pred = self.forward(x, grid, sentence_embeddings)[...,0,0]
         return y_pred, loss_fn(y_pred, y)
+
+
+    def finished_pretraining(self):
+        self.pretrained = True
 
 
 class LLMFNO2d(nn.Module):
@@ -439,23 +548,29 @@ class LLMFNO2d(nn.Module):
 
         # input channel is 12: the solution of the previous 10 timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
 
-        self.conv0 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
-        self.conv1 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
-        self.conv2 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+        self.conv0 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
+        self.conv1 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
+        self.conv2 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)
+        #self.conv0 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+        #self.conv1 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
+        #self.conv2 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2)
 
         # Choose whether or not to add conditioning information here.
-        #self.conv3 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)  # No
-        self.conv3 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2) # Yes
+        self.conv3 = SpectralConv2d_fast(self.width, self.width, self.modes1, self.modes2)  # No
+        #self.conv3 = SpectralConv2d_fast(self.width+1, self.width, self.modes1, self.modes2) # Yes
 
-        self.w0 = nn.Conv2d(self.width+1, self.width, 1)
-        self.w1 = nn.Conv2d(self.width+1, self.width, 1)
-        self.w2 = nn.Conv2d(self.width+1, self.width, 1)
+        #self.w0 = nn.Conv2d(self.width+1, self.width, 1)
+        #self.w1 = nn.Conv2d(self.width+1, self.width, 1)
+        #self.w2 = nn.Conv2d(self.width+1, self.width, 1)
+        self.w0 = nn.Conv2d(self.width, self.width, 1)
+        self.w1 = nn.Conv2d(self.width, self.width, 1)
+        self.w2 = nn.Conv2d(self.width, self.width, 1)
 
         # Choose whether or not to add conditioning information here.
-        #self.w3 = nn.Conv2d(self.width, self.width, 1)  # No
-        self.w3 = nn.Conv2d(self.width+1, self.width, 1) # Yes
+        self.w3 = nn.Conv2d(self.width, self.width, 1)  # No
+        #self.w3 = nn.Conv2d(self.width+1, self.width, 1) # Yes
 
-        self.fc1 = nn.Linear(self.width, 128)
+        self.fc1 = nn.Linear(self.width+1, 128)
         self.fc2 = nn.Linear(128, num_channels)
         self.dropout = nn.Dropout(dropout)
 
@@ -496,25 +611,21 @@ class LLMFNO2d(nn.Module):
         # x dim = [b, x1, x2, t*v]
         x = torch.cat((x, grid), dim=-1)
 
-        # During pretraining get embedding from model output
-        x_emb = self.x_proj(x.flatten(1,3))
+        ### During pretraining get embedding from model output
+        ##x_emb = self.x_proj(x.flatten(1,3))
 
-        # Embed and project sentences
-        sentence_emb = self._llm_forward(sentence_embeddings)
-        sentence_emb = self.sentence_proj(sentence_emb)
-        if(return_embedding):
-            return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1)
-        if(clip):
-            cross_corr = torch.bmm(x_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
-            return cross_corr
-        #else:
-        #    embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1)#.detach()
-        #    embedding = self.proj_up(embedding)
-        #    x = torch.cat((x, embedding.reshape((x.shape[0], 32, 32, 1))), dim=-1)
+        ### Embed and project sentences
+        ##sentence_emb = self._llm_forward(sentence_embeddings)
+        ##sentence_emb = self.sentence_proj(sentence_emb)
+        ##if(return_embedding):
+        ##    return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1)
+        ##if(clip):
+        ##    cross_corr = torch.bmm(x_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
+        ##    return cross_corr
 
-        # Get embedding
-        embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1).detach()
-        embedding = self.proj_up(embedding).reshape((x.shape[0], 1, 34, 34))
+        ### Get embedding
+        ##embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1).detach()
+        ##embedding = self.proj_up(embedding).reshape((x.shape[0], 1, 34, 34))
 
         x = self.fc0(x)
         x = x.permute(0, 3, 1, 2)
@@ -546,6 +657,28 @@ class LLMFNO2d(nn.Module):
         x1 = self.conv3(x)
         x2 = self.w3(x)
         x = x1 + x2
+
+        # During pretraining get embedding from model output
+        print()
+        print(x.shape, x.flatten(1,3).shape)
+        print()
+        print("HERE")
+        x_emb = self.x_proj(x.flatten(1,3))
+
+        # Embed and project sentences
+        sentence_emb = self._llm_forward(sentence_embeddings)
+        sentence_emb = self.sentence_proj(sentence_emb)
+        if(return_embedding):
+            return torch.cat((sentence_emb.unsqueeze(-1), x_emb.unsqueeze(-1)), dim=-1)
+        if(clip):
+            cross_corr = torch.bmm(x_emb.unsqueeze(2), sentence_emb.unsqueeze(1))
+            return cross_corr
+
+        raise
+
+        # Get embedding
+        embedding = torch.cat((x_emb, sentence_emb), dim=-1).unsqueeze(1).detach()
+        embedding = self.proj_up(embedding).reshape((x.shape[0], 1, 34, 34))
 
         x = x[..., :-self.padding, :-self.padding] # Unpad the tensor
         x = x.permute(0, 2, 3, 1)

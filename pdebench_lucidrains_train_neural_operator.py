@@ -25,8 +25,9 @@ from models.transolver import Transolver
 from models.oformer import OFormer2D, SpatialTemporalEncoder2D, STDecoder2D, PointWiseDecoder2D
 from models.deeponet import DeepONet2D
 from models.fno import FNO2d
+from models.factformer import FactFormer2D
 
-from helpers import get_data, get_transformer, get_loss, as_rollout, ar_rollout, get_dpot_loss
+from helpers import get_data, get_transformer, get_neural_operator, get_loss, as_rollout, ar_rollout, get_dpot_loss
 from metrics import metric_func
 
 import sys
@@ -296,36 +297,41 @@ if __name__ == '__main__':
 
     # Load config
     #with open("./configs/2d_vit_config.yaml", 'r') as stream:
-    if(sys.argv[1] == 'transolver'):
-        model_name = 'transolver'
-        config_name = "transolver_2d_config.yaml"
-    elif(sys.argv[1] == 'vit'):
-        model_name = 'vit'
-        config_name = "lucidrains_2d_vit_config.yaml"
-    elif(sys.argv[1] == 'dpot'):
-        model_name = 'dpot'
-        config_name = "dpot_2d_config.yaml"
+    if(sys.argv[1] == 'fno'):
+        model_name = 'fno'
+        config_name = "fno_2d_config.yaml"
+    elif(sys.argv[1] == 'factformer'):
+        model_name = 'factformer'
+        config_name = "factformer_2d_config.yaml"
     else:
-        print("Using ViT by default.")
-        model_name = 'vit'
-        config_path = "lucidrains_2d_vit_config.yaml"
+        raise NotImplementedError("Only FNO supported for now.")
+    #elif(sys.argv[1] == 'vit'):
+    #    model_name = 'vit'
+    #    config_name = "lucidrains_2d_vit_config.yaml"
+    #elif(sys.argv[1] == 'dpot'):
+    #    model_name = 'dpot'
+    #    config_name = "dpot_2d_config.yaml"
+    #else:
+    #    print("Using ViT by default.")
+    #    model_name = 'vit'
+    #    config_path = "lucidrains_2d_vit_config.yaml"
 
     with open("./configs/{}".format(config_name), 'r') as stream:
         config = yaml.safe_load(stream)
 
     # Get arguments and get rid of unnecessary ones
     for subset in [
-            'shallow_water',
-            'diffusion_reaction',
-            'cfd_rand_0.1_0.01_0.01',
-            'cfd_rand_0.1_0.1_0.1',
-            'cfd_rand_0.1_1e-8_1e-8',
-            'cfd_rand_1.0_0.01_0.01',
-            'cfd_rand_1.0_0.1_0.1',
-            'cfd_rand_1.0_1e-8_1e-8',
-            'cfd_turb_0.1_1e-8_1e-8',
-            'cfd_turb_1.0_1e-8_1e-8'
-            #'all'
+            #'shallow_water',
+            #'diffusion_reaction',
+            #'cfd_rand_0.1_0.01_0.01',
+            #'cfd_rand_0.1_0.1_0.1',
+            #'cfd_rand_0.1_1e-8_1e-8',
+            #'cfd_rand_1.0_0.01_0.01',
+            #'cfd_rand_1.0_0.1_0.1',
+            #'cfd_rand_1.0_1e-8_1e-8',
+            #'cfd_turb_0.1_1e-8_1e-8',
+            #'cfd_turb_1.0_1e-8_1e-8',
+            'all'
         ]:
         train_args = config['args']
         train_args['dataset'] = subset
@@ -347,8 +353,9 @@ if __name__ == '__main__':
         #for ns in [10, 20, 50, 100, 200]:#, 500]:
         #for ns in [500]:
         #for ns in [49]:
-        #for ns in [100]:
-        for ns in [1000]:
+        #for ns in [10]:
+        for ns in [100]:
+        #for ns in [1000]:
 
             if(subset == 'all'):
                 train_args['num_samples'] = ns
@@ -356,6 +363,8 @@ if __name__ == '__main__':
             else:
                 train_args['num_samples'] = 1000
                 train_args['num_data_samples'] = 1000
+                #train_args['num_samples'] = ns
+                #train_args['num_data_samples'] = ns
 
             # Creat save directory
             os.makedirs("{}{}/{}".format(train_args['results_dir'], train_args['num_samples'], prefix), exist_ok=True)
@@ -392,7 +401,8 @@ if __name__ == '__main__':
                     print("\nUSING COMBINED DATASET\n")
                     train_args['dataset'] = 'all'
 
-                transformer = get_transformer(model_name, train_args)
+                #transformer = get_transformer(model_name, train_args)
+                transformer = get_neural_operator(model_name, train_args)
 
                 #TODO: adjust this for the PDEBench data sets
                 #for subset in ['heat,adv,burger']:#, 'heat', 'burger', 'adv']:
@@ -403,8 +413,9 @@ if __name__ == '__main__':
 
                 if(train_args['transfer']):
                     for subset in ['shallow_water', 'diffusion_reaction', 'cfd_rand_0.1_0.01_0.01', 'cfd_rand_0.1_0.1_0.1',
-                                   'cfd_rand_0.1_1e-8_1e-8', 'cfd_rand_1.0_0.01_0.01', 'cfd_rand_1.0_0.1_0.1', 'cfd_rand_1.0_1e-8_1e-8',
-                                   'cfd_turb_0.1_1e-8_1e-8', 'cfd_turb_1.0_1e-8_1e-8']:
+                                   'cfd_rand_0.1_1e-8_1e-8', 'cfd_rand_1.0_0.01_0.01', 'cfd_rand_1.0_0.1_0.1',
+                                   'cfd_rand_1.0_1e-8_1e-8',
+                                   'cfd_turb_0.1_1e-8_1e-8', 'cfd_turb_1.0_1e-8_1e-8', 'heat', 'burger', 'adv']:
                         if(train_args['DEBUG']):
                             train_args['dataset'] = 'cfd_rand_0.1_0.01_0.01'
                             train_args['num_data_samples'] = 50

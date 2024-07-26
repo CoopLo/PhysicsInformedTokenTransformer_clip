@@ -1,9 +1,11 @@
 import torch
 import numpy as np
-from models.pitt import LLMPITT2D, LLMPITT2D
+from models.pitt import LLMPITT2D, LLMPITT2D, E2ELLMPITT2D
 from models.transolver import EmbeddingTransolver
 from models.dpot import DPOTNet, LLMDPOTNet
 from models.lucidrains_vit import ViT, CLIPViT, LLMCLIPViT
+from models.fno import FNO2d, CLIPFNO2d
+from models.factformer import FactFormer2D, LLMFactFormer2D
 from metrics import metric_func
 from tqdm import tqdm
 from pdebench_data_handling import MultiDataset
@@ -27,11 +29,15 @@ def make_prediction(config, transformer, x0, grid, t, coeffs=None, sentence_embe
     if(sentence_embeddings is not None):
         if(isinstance(transformer, EmbeddingTransolver)):
             y_pred = transformer(grid, x0, sentence_embeddings)
-        elif(isinstance(transformer, LLMPITT2D)):
+        elif(isinstance(transformer, (LLMPITT2D, E2ELLMPITT2D))):
             y_pred = transformer(grid, sentence_embeddings, x0, t)
         elif(isinstance(transformer, LLMDPOTNet)):
             y_pred, cls_pred = transformer(x0, sentence_embeddings)
             y_pred = y_pred[...,0,:]
+        elif(isinstance(transformer, LLMFactFormer2D)):
+            y_pred = transformer(x0, grid, 1, sentence_embeddings)
+        elif(isinstance(transformer, CLIPFNO2d)):
+            y_pred = transformer(x0, grid, sentence_embeddings)
         else:
             #print(x0.shape, sentence_embeddings.shape)
             y_pred = transformer(x0, sentence_embeddings)[...,0].permute(0,2,3,1)
@@ -43,6 +49,10 @@ def make_prediction(config, transformer, x0, grid, t, coeffs=None, sentence_embe
             #TODO: Figure out class prediction
         elif(isinstance(transformer, ViT)):
             y_pred = transformer(x0)
+        elif(isinstance(transformer, FNO2d)):
+            y_pred = transformer(x0, grid)
+        elif(isinstance(transformer, FactFormer2D)):
+            y_pred = transformer(x0, grid, 1)
 
     return y_pred
 
@@ -116,7 +126,8 @@ def get_loss(config, transformer, x0, grid, coeffs, loss_fn, sentence_embeddings
         return y_pred, y, loss
 
 
-NOISE_SCALE = 1.e-6
+#NOISE_SCALE = 1.e-7
+NOISE_SCALE = 0
 def get_dpot_loss(config, ep, transformer, x0, grid, coeffs, loss_fn, sentence_embeddings=None, times=None, evaluate=False):
     '''
         Mimics training from DPOT paper. Injects noise, uses temporal bundling, also pushforward
@@ -134,11 +145,20 @@ def get_dpot_loss(config, ep, transformer, x0, grid, coeffs, loss_fn, sentence_e
     if(config['time']):
         #sentence_embeddings = torch.cat([sentence_embeddings[idx,i][None] for idx, i in enumerate(steps)], dim=0)
         if(not config['sentence']):
-            sentence_embeddings = torch.cat([sentence_embeddings[idx,i][None] for idx, i in enumerate(steps)], dim=0)
+            if(not isinstance(transformer, FNO2d)):
+                sentence_embeddings = torch.cat([sentence_embeddings[idx,i][None] for idx, i in enumerate(steps)], dim=0)
         else:
             sentence_embeddings = [sentence_embeddings[i][idx] for idx, i in enumerate(steps)]
 
-    t = times[:,0] if(isinstance(transformer, LLMPITT2D)) else None
+    #t = times[:,0] if(isinstance(transformer, LLMPITT2D)) else None
+    if(isinstance(transformer, (LLMPITT2D, E2ELLMPITT2D))):
+        try:
+            t = torch.cat([times[0][0][None] if(coeffs[idx][0] == 1.) else times[1][0][None] for idx in range(len(steps))], dim=0)
+        except IndexError:
+            t = torch.cat([times[0][0][None] if(coeffs[idx][0] == 1.) else times[0][0][None] for idx in range(len(steps))], dim=0)
+    else:
+        t = None
+
     loss = 0
     for step in range(0, horizon, config['t_bundle']):
         # Inject noise
@@ -151,6 +171,13 @@ def get_dpot_loss(config, ep, transformer, x0, grid, coeffs, loss_fn, sentence_e
         target_step = config['initial_step'] + step
         y = torch.cat([x0[idx,:,:,i+step:i+step+config['t_bundle'],:][None] for idx, i in enumerate(steps)], dim=0)
 
+        #print()
+        #print()
+        #print(y_pred.shape)
+        #print(y.shape)
+        #print()
+        #print()
+        #raise
         sample_loss = loss_fn(y_pred, y)
         if(sample_loss.isnan()):
             break
@@ -158,7 +185,8 @@ def get_dpot_loss(config, ep, transformer, x0, grid, coeffs, loss_fn, sentence_e
             loss += sample_loss
 
         # Update input
-        inp = torch.cat((inp[..., config['t_bundle']:,:], y_pred.unsqueeze(3)), dim=-2)
+        #print(y_pred.shape
+        #inp = torch.cat((inp[..., config['t_bundle']:,:], y_pred.unsqueeze(3)), dim=-2)
 
     # Compute the loss.
     if(evaluate):
@@ -168,7 +196,10 @@ def get_dpot_loss(config, ep, transformer, x0, grid, coeffs, loss_fn, sentence_e
             ch2 = not((y[...,-1,2] == 0).all())
             ch3 = not((y[...,-1,3] == 0).all())
             chans = [ch0, ch1, ch2, ch3]
-            err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = metric_func(y_pred.unsqueeze(3)[...,chans], y[...,chans],
+            if(len(y_pred.shape) == 4):
+                y_pred = y_pred.unsqueeze(3)
+            #err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = metric_func(y_pred.unsqueeze(3)[...,chans], y[...,chans],
+            err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = metric_func(y_pred[...,chans], y[...,chans],
                                                                                if_mean=True, Lx=1., Ly=1., Lz=1.)
         else:
             err_RMSE, err_nRMSE, err_CSV, err_Max, err_BD, err_F = metric_func(y_pred.unsqueeze(3), y,
@@ -216,7 +247,7 @@ def get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddi
 
         if(not isinstance(times, torch.Tensor)):
             times = torch.Tensor(times)
-        if(isinstance(transformer, LLMPITT2D)):
+        if(isinstance(transformer, (LLMPITT2D, E2ELLMPITT2D))):
             # TODO Fix this. Should be dt, coeffs come later
             t = torch.cat([times[idx, i][None] for idx, i in enumerate(steps)], dim=0)
         else:
@@ -224,37 +255,10 @@ def get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddi
 
         # Get correct string
         if(config['time']):
-            #print()
-            #print(coeffs.shape)
-            #print(len(sentence_embeddings))
-            #print(len(sentence_embeddings[0]))
-            #print()
-            #print(steps)
-            ##print([(idx, i) for idx, i in enumerate(steps)])
-            #print(sentence_embeddings[17][0])
-            #print(coeffs[0])
-            #print()
-            #print(sentence_embeddings[20][1])
-            #print(coeffs[1])
-            #print()
-            #print(sentence_embeddings[10][2])
-            #print(coeffs[2])
-            #print()
-            #print(steps)
-            #print([idx for idx, i in enumerate(steps)])
-            #print([i for idx, i in enumerate(steps)])
-            #sentence_embeddings = [sentence_embeddings[i][idx][None] for idx, i in enumerate(steps)]
             if(not config['sentence']):
                 sentence_embeddings = torch.cat([sentence_embeddings[idx,i][None] for idx, i in enumerate(steps)], dim=0)
             else:
                 sentence_embeddings = [sentence_embeddings[i][idx] for idx, i in enumerate(steps)]
-
-        #print()
-        #print()
-        #print(sentence_embeddings.shape)
-        #print()
-        #print()
-        #raise
 
     elif(config['train_style'] == 'fixed_future'):
         y = x0[:, config['sim_time']]
@@ -294,9 +298,14 @@ def get_pretraining_loss(config, transformer, x0, grid, coeffs, sentence_embeddi
                 x0 = x0.flatten(3,4)
 
     # Forward pass
-    y_pred = transformer(x0, sentence_embeddings, clip=True, ep=ep)
+    if(isinstance(transformer, LLMFactFormer2D)):
+        y_pred = transformer(x0, grid, 1, sentence_embeddings, clip=True, ep=ep)
+    if(isinstance(transformer, CLIPFNO2d)):
+        y_pred = transformer(x0, grid, sentence_embeddings, clip=True)
+    else:
+        y_pred = transformer(x0, sentence_embeddings, clip=True, ep=ep)
     labels = generate_pretraining_labels(config, original_coeffs, y_pred)
-    loss = loss_fn(y_pred, labels)
+    loss = loss_fn(y_pred, labels.to(device=y_pred.device))
 
     return loss
 
@@ -387,7 +396,7 @@ def _get_grid_coeff_embeddings(test_loader, idx, transformer, config):
 
         grid = test_loader.dataset.grids[dset_idx].unsqueeze(0)
 
-        if(not isinstance(transformer, (DPOTNet, ViT))):
+        if(not isinstance(transformer, (FactFormer2D, DPOTNet, ViT, FNO2d))):
             # Select sentence embedding differently based on time or sentence...
             sentence_embeddings = test_loader.dataset.dsets[dset_idx].sentence_embeddings[sample_idx]
             if(config['time']):
@@ -406,7 +415,7 @@ def _get_grid_coeff_embeddings(test_loader, idx, transformer, config):
 
     else:
         grid = test_loader.dataset.grid.unsqueeze(0)
-        if(not isinstance(transformer, (DPOTNet, ViT))):
+        if(not isinstance(transformer, (DPOTNet, ViT, FNO2d, FactFormer2D))):
 
             sentence_embeddings = test_loader.dataset.sentence_embeddings[idx]
 
@@ -443,7 +452,7 @@ def ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=0
                 x0 = test_loader.dataset.data[idx][...,:config['initial_step'],:].unsqueeze(0).flatten(3,4)
 
             y = test_loader.dataset.data[idx][...,config['initial_step']:,:].unsqueeze(0)
-            if(isinstance(transformer, LLMPITT2D)):
+            if(isinstance(transformer, (LLMPITT2D, E2ELLMPITT2D))):
                 if(test_loader.dataset.dt.shape[0] == test_loader.dataset.data.shape[0]):
                     t = test_loader.dataset.dt[idx][0].unsqueeze(0)
                 else:
@@ -466,15 +475,33 @@ def ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=0
                         #print(len(sentence_embeddings))
                         s_emb = [sentence_embeddings[i+config['initial_step']]]
                     else:
-                        s_emb = sentence_embeddings[:,i+config['initial_step']]
+                        try:
+                            s_emb = sentence_embeddings[:,i+config['initial_step']]
+                        except TypeError:
+                            s_emb = None
                 else:
                     s_emb = sentence_embeddings
 
                 # Should I update the channels during rollout...?
-                y_pred = make_prediction(config, transformer, x0, grid, t, coeffs=coeffs, sentence_embeddings=s_emb)
+                s_emb = s_emb if(isinstance(s_emb, list)) else \
+                                s_emb.to(device='cuda:0') if(not isinstance(transformer, (CLIPFNO2d, LLMFactFormer2D, FactFormer2D, FNO2d, LLMPITT2D))) else \
+                                s_emb.to(device='cuda:0') if(s_emb is not None) else s_emb
+    
+                #y_pred = make_prediction(config, transformer, x0, grid, t, coeffs=coeffs, sentence_embeddings=s_emb)
+                x0 = x0.cuda()
+                grid = grid.cuda()
+                #t = t.cuda()
+                coeffs = coeffs.cuda()
+                t = t.to('cuda:0') if(t is not None) else t
+                y_pred = make_prediction(config, transformer,
+                        x0.to('cuda:0'),
+                        grid.to('cuda:0'),
+                        t,
+                        coeffs=coeffs.to('cuda:0'),
+                                         sentence_embeddings=s_emb)
                 if(isinstance(transformer, EmbeddingTransolver)):
                     x0 = torch.cat((x0, y_pred), dim=-1)[...,-transformer.space_dim:]
-                elif(isinstance(transformer, LLMPITT2D)):
+                elif(isinstance(transformer, (LLMPITT2D, E2ELLMPITT2D))):
                     x0 = torch.cat((x0, y_pred), dim=-1)[...,-transformer.neural_operator.channels:]
                 elif(isinstance(transformer, (DPOTNet, LLMDPOTNet))):
                     x0 = torch.cat((x0, y_pred.unsqueeze(3)), dim=-2)[...,-transformer.in_timesteps:,:]
@@ -482,12 +509,16 @@ def ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=0
                     shift = -transformer.channels + 5 if(config['coeff']) else -transformer.channels 
 
                     # Zero out relevant channels from prediction
-                    ch0 = (y[...,0] == 0).all()
-                    ch1 = (y[...,1] == 0).all()
-                    ch2 = (y[...,2] == 0).all()
-                    ch3 = (y[...,3] == 0).all()
-                    chans = [ch0, ch1, ch2, ch3]
-                    y_pred[...,chans] = 0
+                    if((len(y.shape) == 5) and (y.shape[-1] == 4)):
+                        ch0 = (y[...,0] == 0).all()
+                        ch1 = (y[...,1] == 0).all()
+                        ch2 = (y[...,2] == 0).all()
+                        ch3 = (y[...,3] == 0).all()
+                        chans = [ch0, ch1, ch2, ch3]
+                        y_pred[...,chans] = 0
+
+                    if(len(y_pred.shape) == 5):
+                        y_pred = y_pred[...,0,:]
 
                     x0 = torch.cat((x0, y_pred), dim=-1)[...,shift:]
 
@@ -507,17 +538,20 @@ def ar_rollout(test_loader, transformer, loss_fn, config, prefix, subset, seed=0
     #mse = ((all_y_preds - all_y_trues)**2).mean(dim=(0,2))
 
     # Only relevant channels
-    ch0 = not((y[...,0] == 0).all())
-    ch1 = not((y[...,1] == 0).all())
-    ch2 = not((y[...,2] == 0).all())
-    ch3 = not((y[...,3] == 0).all())
-    chans = [ch0, ch1, ch2, ch3]
-    mse = ((all_y_preds[...,chans] - all_y_trues[...,chans])**2).mean(dim=(1,2,4))
+    if((len(y.shape) == 5) and (y.shape[-1] == 4)):
+        ch0 = not((y[...,0] == 0).all())
+        ch1 = not((y[...,1] == 0).all())
+        ch2 = not((y[...,2] == 0).all())
+        ch3 = not((y[...,3] == 0).all())
+        chans = [ch0, ch1, ch2, ch3]
+        mse = ((all_y_preds[...,chans] - all_y_trues[...,chans])**2).mean(dim=(1,2,4))
+    else:
+        mse = ((all_y_preds - all_y_trues)**2).mean(dim=(1,2,4))
 
     # Save relevant info
     #path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'],
     #                           config['pretraining_num_samples'], prefix)
-    if(not isinstance(transformer, (DPOTNet, ViT))):
+    if(not isinstance(transformer, (DPOTNet, ViT, FNO2d, FactFormer2D))):
         path = "{}{}_{}/{}".format(config['results_dir'], config['num_samples'], config['pretraining_num_samples'], prefix)
     else:
         path = "{}{}/{}".format(config['results_dir'], config['num_samples'], prefix)
